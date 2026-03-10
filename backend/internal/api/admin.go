@@ -366,13 +366,22 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 		return
 	}
 
+	// Create HME client and run Bootstrap to get all necessary cookies (aidsp, idclient, etc.)
+	if session.HME == nil {
+		session.HME = apple.NewHMEClient(session.Auth)
+	}
+	if err := session.HME.Bootstrap(); err != nil {
+		log.Printf("[2FA] Bootstrap warning (session still valid): %v", err)
+	}
+
 	// Update account status
 	store.DB.Model(&store.Account{}).Where("id = ?", session.AccountID).Updates(map[string]interface{}{
-		"status":     1,
-		"last_error": "",
+		"status":             1,
+		"last_error":         "",
+		"two_factor_enabled": true,
 	})
 
-	// Persist full Apple session (tokens + cookies) to database
+	// Persist full Apple session (tokens + cookies) to database AFTER Bootstrap
 	go saveAppleSession(session.AccountID, session.Auth)
 
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]bool{"authenticated": true}})
@@ -414,6 +423,8 @@ func (s *Server) GetAccountHME(c *gin.Context) {
 			log.Printf("[GetAccountHME] Apple API error (falling back to DB): %v", err)
 		} else {
 			go syncHMEToDB(uint(id), emails)
+			// Save session after successful HME operation (Bootstrap may have added new cookies)
+			go saveAppleSession(uint(id), session.Auth)
 			c.JSON(http.StatusOK, APIResponse{Success: true, Data: emails})
 			return
 		}
