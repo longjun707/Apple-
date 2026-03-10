@@ -41,8 +41,10 @@ func main() {
 			log.Println("   Running without database persistence...")
 		} else {
 			defer store.Close()
-			// Start periodic session refresh (initial + every 4 minutes)
+			// Start periodic session refresh (initial + every 3-5 minutes)
 			go api.StartPeriodicSessionRefresh()
+			// Start periodic HME auto-creation (every 30 minutes, 20 per account)
+			go api.StartPeriodicHMECreation()
 		}
 	}
 

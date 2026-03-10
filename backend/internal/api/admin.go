@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -607,6 +608,119 @@ func StartPeriodicSessionRefresh() {
 		}
 	}()
 	log.Printf("[Session] Periodic session refresh started (random 3-5 minutes)")
+}
+
+// StartPeriodicHMECreation starts a goroutine that creates HME for all accounts every 30 minutes
+func StartPeriodicHMECreation() {
+	go func() {
+		for {
+			// Wait 30 minutes
+			log.Printf("[AutoHME] Next auto-creation in 30 minutes")
+			time.Sleep(30 * time.Minute)
+
+			log.Printf("[AutoHME] Starting periodic HME creation for all accounts...")
+			AutoCreateHMEForAllAccounts(20) // Create 20 HME per account
+		}
+	}()
+	log.Printf("[AutoHME] Periodic HME creation started (every 30 minutes, 20 per account)")
+}
+
+// AutoCreateHMEForAllAccounts creates HME for all accounts with valid sessions
+// This runs in a single goroutine, processing accounts sequentially (no concurrency)
+func AutoCreateHMEForAllAccounts(countPerAccount int) {
+	if store.DB == nil {
+		log.Printf("[AutoHME] Database not connected, skipping")
+		return
+	}
+
+	// Find all accounts with valid sessions (status=1 means logged in)
+	var accounts []store.Account
+	if err := store.DB.Where("session_token != '' AND session_token IS NOT NULL AND status = 1").Find(&accounts).Error; err != nil {
+		log.Printf("[AutoHME] Failed to query accounts: %v", err)
+		return
+	}
+
+	if len(accounts) == 0 {
+		log.Printf("[AutoHME] No accounts with valid sessions found")
+		return
+	}
+
+	log.Printf("[AutoHME] Found %d accounts, creating %d HME each (sequentially)...", len(accounts), countPerAccount)
+
+	totalCreated := 0
+	totalFailed := 0
+
+	for _, account := range accounts {
+		log.Printf("[AutoHME] Processing account %d (%s)...", account.ID, account.AppleID)
+
+		// Restore session
+		auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
+		hme := apple.NewHMEClient(auth)
+
+		// First extend session to make sure it's valid
+		ok, err := hme.ExtendSession()
+		if !ok {
+			log.Printf("[AutoHME] Account %d session invalid: %v, skipping", account.ID, err)
+			continue
+		}
+
+		// Create HME one by one (synchronously, no concurrency)
+		created := 0
+		failed := 0
+		for i := 0; i < countPerAccount; i++ {
+			label := fmt.Sprintf("Auto-%s-%d", time.Now().Format("0102"), i+1)
+			email, err := hme.CreateEmail(label, "", "")
+			if err != nil {
+				log.Printf("[AutoHME] Account %d: failed to create HME #%d: %v", account.ID, i+1, err)
+				failed++
+				// If we get too many consecutive failures, stop for this account
+				if failed >= 3 {
+					log.Printf("[AutoHME] Account %d: too many failures, skipping remaining", account.ID)
+					break
+				}
+				time.Sleep(2 * time.Second) // Wait longer on failure
+				continue
+			}
+
+			// Save to database
+			hmeRepo := store.NewHMERepo()
+			hmeRepo.Create(&store.HMERecord{
+				AccountID:      account.ID,
+				HMEID:          email.ID,
+				EmailAddress:   email.EmailAddress,
+				Label:          email.Label,
+				Note:           email.Note,
+				ForwardToEmail: email.ForwardToEmail,
+				Active:         email.Active,
+			})
+
+			created++
+			log.Printf("[AutoHME] Account %d: created HME #%d: %s", account.ID, i+1, email.EmailAddress)
+
+			// Delay between creations (1 second)
+			if i < countPerAccount-1 {
+				time.Sleep(1 * time.Second)
+			}
+		}
+
+		// Update HME count for this account
+		hmeRepo := store.NewHMERepo()
+		count, _ := hmeRepo.Count(account.ID)
+		store.NewAccountRepo().UpdateHMECount(account.ID, int(count))
+
+		// Save session (may have new cookies)
+		saveAppleSession(account.ID, auth)
+
+		totalCreated += created
+		totalFailed += failed
+
+		log.Printf("[AutoHME] Account %d: completed, created=%d, failed=%d", account.ID, created, failed)
+
+		// Small delay between accounts
+		time.Sleep(2 * time.Second)
+	}
+
+	log.Printf("[AutoHME] Periodic HME creation complete: total created=%d, total failed=%d", totalCreated, totalFailed)
 }
 
 // hmeRecordToEmail converts a DB HMERecord to the Apple HMEEmail format expected by frontend
