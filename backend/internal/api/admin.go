@@ -435,7 +435,7 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 	var req CreateHMERequest
 	c.ShouldBindJSON(&req)
 
-	hme, err := session.HME.CreateEmail(req.Label, req.Note)
+	hme, err := session.HME.CreateEmail(req.Label, req.Note, req.ForwardToEmail)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -610,6 +610,30 @@ func (s *Server) AdminChangePassword(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }
 
+// GetAccountForwardEmails returns available forward-to emails for an account
+func (s *Server) GetAccountForwardEmails(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+	if session.AdminID == 0 {
+		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
+		return
+	}
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+
+	if session.HME == nil || session.AccountID != uint(id) || !session.Auth.IsAuthenticated() {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	emails, err := session.HME.GetForwardEmails()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: emails})
+}
+
 // BatchCreateAccountHME batch creates HME for an account
 func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
@@ -634,7 +658,7 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 		req.DelayMs = 1000
 	}
 
-	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs)
+	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail)
 
 	// Save to database
 	if len(results) > 0 {

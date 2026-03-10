@@ -110,14 +110,16 @@ type TwoFARequest struct {
 }
 
 type CreateHMERequest struct {
-	Label string `json:"label,omitempty"`
-	Note  string `json:"note,omitempty"`
+	Label          string `json:"label,omitempty"`
+	Note           string `json:"note,omitempty"`
+	ForwardToEmail string `json:"forwardToEmail,omitempty"`
 }
 
 type BatchCreateRequest struct {
-	Count       int    `json:"count" binding:"required,min=1,max=100"`
-	LabelPrefix string `json:"labelPrefix,omitempty"`
-	DelayMs     int    `json:"delayMs,omitempty"`
+	Count          int    `json:"count" binding:"required,min=1,max=100"`
+	LabelPrefix    string `json:"labelPrefix,omitempty"`
+	DelayMs        int    `json:"delayMs,omitempty"`
+	ForwardToEmail string `json:"forwardToEmail,omitempty"`
 }
 
 type APIResponse struct {
@@ -302,7 +304,7 @@ func (s *Server) CreateHME(c *gin.Context) {
 		return
 	}
 
-	hme, err := session.HME.CreateEmail(req.Label, req.Note)
+	hme, err := session.HME.CreateEmail(req.Label, req.Note, req.ForwardToEmail)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -350,7 +352,7 @@ func (s *Server) BatchCreateHME(c *gin.Context) {
 		req.DelayMs = 1000
 	}
 
-	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs)
+	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail)
 
 	errorStrings := make([]string, len(errors))
 	for i, err := range errors {

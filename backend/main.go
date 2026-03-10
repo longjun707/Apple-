@@ -90,6 +90,7 @@ func main() {
 				accounts.POST("/:id/hme", server.CreateAccountHME)
 				accounts.POST("/:id/hme/batch", server.BatchCreateAccountHME)
 				accounts.DELETE("/:id/hme/:hmeId", server.DeleteAccountHME)
+				accounts.GET("/:id/forward-emails", server.GetAccountForwardEmails)
 			}
 		}
 

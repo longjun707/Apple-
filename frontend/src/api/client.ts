@@ -175,14 +175,17 @@ export const api = {
   getAccountHME: (id: number) =>
     request<HMEEmail[]>('GET', `/accounts/${id}/hme`),
 
-  createAccountHME: (id: number, label?: string, note?: string) =>
-    request<HMEEmail>('POST', `/accounts/${id}/hme`, { label, note }),
+  createAccountHME: (id: number, label?: string, note?: string, forwardToEmail?: string) =>
+    request<HMEEmail>('POST', `/accounts/${id}/hme`, { label, note, forwardToEmail }),
 
-  batchCreateAccountHME: (id: number, count: number, labelPrefix?: string, delayMs?: number) =>
-    request<BatchCreateResult>('POST', `/accounts/${id}/hme/batch`, { count, labelPrefix, delayMs }),
+  batchCreateAccountHME: (id: number, count: number, labelPrefix?: string, delayMs?: number, forwardToEmail?: string) =>
+    request<BatchCreateResult>('POST', `/accounts/${id}/hme/batch`, { count, labelPrefix, delayMs, forwardToEmail }),
 
   deleteAccountHME: (accountId: number, hmeId: string) =>
     request('DELETE', `/accounts/${accountId}/hme/${hmeId}`),
+
+  getAccountForwardEmails: (id: number) =>
+    request<string[]>('GET', `/accounts/${id}/forward-emails`),
 
   // Admin extended
   getStats: () => request<StatsResult>('GET', '/admin/stats'),

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useAuthStore } from '@/stores/authStore'
-import { Lock, Shield } from 'lucide-react'
+import { Lock, Shield, User } from 'lucide-react'
 import Button from '@/components/ui/Button'
 
 const CREDENTIALS_KEY = 'admin-credentials'
