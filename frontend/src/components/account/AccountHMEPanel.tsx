@@ -1,8 +1,8 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api, type AppleAccount, type HMEEmail } from '@/api/client'
+import { api, type AppleAccount, type HMEEmail, type FamilyResponse } from '@/api/client'
 import { toast } from '@/stores/toastStore'
-import { Loader2, ArrowLeft, RefreshCw, Mail, Plus, X } from 'lucide-react'
+import { Loader2, ArrowLeft, RefreshCw, Mail, Plus, X, Users, Crown, User } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog'
 import Pagination from '@/components/ui/Pagination'
@@ -42,6 +42,17 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
   })
 
   const hmeList = data || []
+
+  // Family members query
+  const { data: familyData, isLoading: familyLoading, refetch: refetchFamily } = useQuery({
+    queryKey: ['account-family', account.id],
+    queryFn: async () => {
+      const res = await api.getFamilyMembers(account.id)
+      if (!res.success) return null
+      return res.data as FamilyResponse
+    },
+    retry: false,
+  })
 
   // ---- Mutations ----
   const deleteMutation = useMutation({
@@ -250,6 +261,81 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
           {alternateEmails.length === 0 && (
             <div className="text-[12px] text-gray-400 text-center py-2">
               暂无备用邮箱，点击上方按钮添加
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Family Members Section */}
+      <div className="mb-5 bg-white rounded-2xl shadow-card border border-gray-100/80 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Users className="w-4 h-4 text-gray-400" />
+            <span className="text-sm font-medium text-gray-700">
+              家人共享 ({familyData?.familyMembers?.length || 0})
+            </span>
+            <button
+              onClick={() => refetchFamily()}
+              disabled={familyLoading}
+              className="p-1 text-gray-400 hover:text-apple-blue hover:bg-blue-50 rounded transition-all disabled:opacity-50"
+              title="刷新家庭成员"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${familyLoading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+        </div>
+        <div className="space-y-2">
+          {familyLoading ? (
+            <div className="flex items-center justify-center py-4">
+              <Loader2 className="w-5 h-5 animate-spin text-gray-400" />
+            </div>
+          ) : familyData?.familyMembers && familyData.familyMembers.length > 0 ? (
+            familyData.familyMembers.map((member) => {
+              const isOrganizer = familyData.family?.organizerDsid === member.dsid
+              const isCurrent = familyData.currentDsid === member.dsid
+              return (
+                <div
+                  key={member.dsid}
+                  className={`flex items-center gap-3 p-2.5 rounded-xl ${
+                    isCurrent ? 'bg-blue-50/50' : 'bg-gray-50/50'
+                  }`}
+                >
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                    isOrganizer ? 'bg-purple-100' : member.isParent ? 'bg-orange-100' : 'bg-gray-100'
+                  }`}>
+                    {isOrganizer ? (
+                      <Crown className="w-4 h-4 text-purple-600" />
+                    ) : (
+                      <User className="w-4 h-4 text-gray-500" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-sm font-medium truncate ${
+                        isCurrent ? 'text-blue-700' : 'text-gray-900'
+                      }`}>
+                        {member.fullName}
+                      </span>
+                      {isCurrent && (
+                        <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">
+                          当前
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-gray-400 truncate">
+                      {member.appleId}
+                      <span className="mx-1">·</span>
+                      {isOrganizer ? '组织者' : member.isParent ? '家长' : member.ageClassification === 'CHILD' ? '儿童' : '成员'}
+                      <span className="mx-1">·</span>
+                      {member.ageInYears}岁
+                    </div>
+                  </div>
+                </div>
+              )
+            })
+          ) : (
+            <div className="text-[12px] text-gray-400 text-center py-2">
+              {familyData === null ? '需要先登录账户' : '未加入家人共享'}
             </div>
           )}
         </div>

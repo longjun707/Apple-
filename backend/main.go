@@ -112,6 +112,8 @@ func main() {
 				accounts.POST("/:id/alternate-email/send-verification", server.SendAlternateEmailVerification)
 				accounts.POST("/:id/alternate-email/verify", server.VerifyAlternateEmail)
 				accounts.DELETE("/:id/alternate-email", server.RemoveAlternateEmail)
+				// Family members
+				accounts.GET("/:id/family", server.GetFamilyMembers)
 			}
 		}
 

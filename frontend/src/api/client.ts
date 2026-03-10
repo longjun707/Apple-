@@ -106,6 +106,31 @@ export interface HMEListResult {
   pageSize: number
 }
 
+export interface FamilyMember {
+  dsid: string
+  firstName: string
+  lastName: string
+  fullName: string
+  ageClassification: string // ADULT, CHILD
+  appleId: string
+  ageInYears: number
+  isParent: boolean
+}
+
+export interface FamilyInfo {
+  familyId: string
+  organizerDsid: string
+}
+
+export interface FamilyResponse {
+  currentDsid: string
+  currentUserAppleId: string
+  family?: FamilyInfo
+  familyMembers: FamilyMember[]
+  isLinkedToFamily: boolean
+  isMemberOfFamily: boolean
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -228,6 +253,10 @@ export const api = {
 
   removeAlternateEmail: (accountId: number, email: string) =>
     request('DELETE', `/accounts/${accountId}/alternate-email`, { email }),
+
+  // Family members
+  getFamilyMembers: (accountId: number) =>
+    request<FamilyResponse>('GET', `/accounts/${accountId}/family`),
 
   // Health
   health: () => request('GET', '/health'),

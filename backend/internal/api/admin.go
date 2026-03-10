@@ -1156,3 +1156,27 @@ func (s *Server) RemoveAlternateEmail(c *gin.Context) {
 
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }
+
+// GetFamilyMembers returns family sharing members for an account
+func (s *Server) GetFamilyMembers(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+
+	if !ensureAppleSession(session, uint(id)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	familyResp, err := session.HME.GetFamilyMembers()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: familyResp})
+}
