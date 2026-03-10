@@ -24,7 +24,6 @@ export default function EmailsPage() {
 
   const list = data?.data?.list || []
   const total = data?.data?.total || 0
-  const pageSize = data?.data?.pageSize || 20
   const totalPages = Math.ceil(total / pageSize)
 
   const handleSearch = (e: React.FormEvent) => {

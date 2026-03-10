@@ -510,6 +510,7 @@ var cookieDomains = []string{
 	"https://apple.com",
 	"https://idmsa.apple.com",
 	"https://appleid.apple.com",
+	"https://account.apple.com",
 	"https://www.icloud.com",
 	"https://setup.icloud.com",
 }
@@ -519,7 +520,18 @@ func (a *AppleAuth) ExportSessionData() (token, scnt, sessionID, cookiesJSON str
 	a.session.mu.RLock()
 	defer a.session.mu.RUnlock()
 
+	// Use myacinfo as token if SessionToken is empty
 	token = a.session.SessionToken
+	if token == "" {
+		// Try to get myacinfo cookie as fallback token
+		u, _ := url.Parse("https://apple.com")
+		for _, c := range a.session.Client.Jar.Cookies(u) {
+			if c.Name == "myacinfo" && c.Value != "" {
+				token = c.Value
+				break
+			}
+		}
+	}
 	scnt = a.session.SCNT
 	sessionID = a.session.SessionID
 
