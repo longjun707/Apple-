@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -31,18 +32,30 @@ func (c *HMEClient) hmeHeaders() map[string]string {
 		"Origin":                    "https://account.apple.com",
 		"Referer":                   "https://account.apple.com/",
 		"User-Agent":                ChromeUA,
-		"X-Apple-Api-Key":           HMEWidgetKey,
 		"X-Apple-I-Request-Context": "ca",
 		"X-Apple-I-Timezone":        "Asia/Shanghai",
 		"X-Apple-I-FD-Client-Info":  `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`,
+		// Security headers like browser
+		"Sec-Ch-Ua":          `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`,
+		"Sec-Ch-Ua-Mobile":   "?0",
+		"Sec-Ch-Ua-Platform": `"Windows"`,
+		"Sec-Fetch-Dest":     "empty",
+		"Sec-Fetch-Mode":     "cors",
+		"Sec-Fetch-Site":     "same-site",
 	}
 
 	c.auth.session.mu.RLock()
 	if c.auth.session.SCNT != "" {
 		headers["scnt"] = c.auth.session.SCNT
+		log.Printf("[HME] Using scnt (len=%d)", len(c.auth.session.SCNT))
+	} else {
+		log.Printf("[HME] WARNING: No scnt available!")
 	}
 	if c.auth.session.SessionID != "" {
 		headers["X-Apple-ID-Session-Id"] = c.auth.session.SessionID
+		log.Printf("[HME] Using SessionID (len=%d)", len(c.auth.session.SessionID))
+	} else {
+		log.Printf("[HME] WARNING: No SessionID available!")
 	}
 	c.auth.session.mu.RUnlock()
 
@@ -69,6 +82,15 @@ func (c *HMEClient) doRequest(method, urlPath string, body interface{}) (*http.R
 		req.Header.Set(k, v)
 	}
 
+	// Log cookies being sent for debugging
+	parsedURL, _ := url.Parse(urlPath)
+	cookies := c.auth.session.Client.Jar.Cookies(parsedURL)
+	cookieNames := make([]string, 0, len(cookies))
+	for _, ck := range cookies {
+		cookieNames = append(cookieNames, ck.Name)
+	}
+	log.Printf("[HME] %s %s - sending cookies: %v", method, urlPath, cookieNames)
+
 	resp, err := c.auth.session.Client.Do(req)
 	if err != nil {
 		return nil, err
@@ -90,16 +112,21 @@ func (c *HMEClient) Bootstrap() error {
 		return nil
 	}
 
-	// Step 0: Exchange idmsa session for account.apple.com session
-	// This is required because SRP auth sets cookies on idmsa.apple.com,
-	// but HME APIs need account.apple.com session
-	if err := c.exchangeAccountSession(); err != nil {
-		srpLog.Printf("[HME] account session exchange warning: %v", err)
-		// Continue anyway - cookies might already be valid
-	}
+	// NOTE: We skip exchangeAccountSession() because browser doesn't do it after 2FA
+	// The myacinfo cookie from 2FA is sufficient
 
 	// Ensure myacinfo cookie exists
 	c.ensureMyacinfo()
+
+	// CRITICAL: Set idclient=web cookie on appleid.apple.com (browser does this)
+	// This is required for token exchange to work
+	appleidURL, _ := url.Parse("https://appleid.apple.com")
+	c.auth.session.Client.Jar.SetCookies(appleidURL, []*http.Cookie{{
+		Name:  "idclient",
+		Value: "web",
+		Path:  "/",
+	}})
+	log.Printf("[HME] Set idclient=web on appleid.apple.com")
 
 	// Log cookies for debugging
 	c.logCookies()
@@ -111,26 +138,40 @@ func (c *HMEClient) Bootstrap() error {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	srpLog.Printf("[HME] bootstrap status=%d, body_len=%d, body=%s", resp.StatusCode, len(body), string(body[:min(len(body), 500)]))
+	log.Printf("[HME] bootstrap status=%d", resp.StatusCode)
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("bootstrap failed: HTTP %d - %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+	}
+
+	// Capture aidsp and other cookies from bootstrap response
+	for _, cookie := range resp.Cookies() {
+		log.Printf("[HME] bootstrap Set-Cookie: %s (domain=%s)", cookie.Name, cookie.Domain)
+		if cookie.Name == "aidsp" {
+			// Ensure aidsp is set on appleid.apple.com
+			c.auth.session.Client.Jar.SetCookies(appleidURL, []*http.Cookie{{
+				Name:  "aidsp",
+				Value: cookie.Value,
+				Path:  "/",
+			}})
+			log.Printf("[HME] Set aidsp on appleid.apple.com")
+		}
 	}
 
 	// Step 2: Token exchange (non-fatal — HME API may work without it)
 	resp, err = c.doRequest("GET", TokenURL, nil)
 	if err != nil {
-		srpLog.Printf("[HME] token exchange error (non-fatal): %v", err)
+		log.Printf("[HME] token exchange error (non-fatal): %v", err)
 	} else {
 		body, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
-		srpLog.Printf("[HME] token exchange status=%d, body_len=%d, body=%s", resp.StatusCode, len(body), string(body[:min(len(body), 500)]))
+		log.Printf("[HME] token exchange status=%d", resp.StatusCode)
 		if resp.StatusCode != 200 {
-			srpLog.Printf("[HME] token exchange failed (non-fatal): HTTP %d", resp.StatusCode)
+			log.Printf("[HME] token exchange failed (non-fatal): HTTP %d", resp.StatusCode)
 		}
 	}
 
 	c.bootstrapped = true
-	srpLog.Printf("[HME] bootstrap complete")
+	log.Printf("[HME] bootstrap complete")
 	return nil
 }
 

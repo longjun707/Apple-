@@ -1,7 +1,6 @@
 package apple
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -299,14 +298,9 @@ func (c *SRPClient) Generate(salt, serverPublicKey []byte) (string, error) {
 }
 
 // GenerateM2 generates the M2 value for server verification
+// All modes (including GSA) use: M2 = H(A || M1 || K)
+// This matches Python pysrp implementation
 func (c *SRPClient) GenerateM2() []byte {
-	if c.mode == ModeGSA {
-		// Apple uses HMAC-SHA256(key=K, msg=M1)
-		mac := hmac.New(sha256.New, c.K)
-		mac.Write(c.M)
-		return mac.Sum(nil)
-	}
-	// Standard SRP: M2 = H(A | M1 | K)
 	return hashBytes(c.hash, concat(c.A.Bytes(), c.M, c.K))
 }
 

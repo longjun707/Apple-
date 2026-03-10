@@ -24,15 +24,17 @@ const (
 
 // Session holds the authenticated session state
 type Session struct {
-	mu           sync.RWMutex
-	Client       *http.Client
-	Cookies      []*http.Cookie
-	SCNT         string
-	SessionID    string
-	SessionToken string
-	AppleID      string
-	Authenticated bool
-	LastActivity time.Time
+	mu             sync.RWMutex
+	Client         *http.Client
+	Cookies        []*http.Cookie
+	SCNT           string
+	SessionID      string
+	SessionToken   string
+	AppleID        string
+	Authenticated  bool
+	LastActivity   time.Time
+	OAuthState     string // OAuth state for auth flow
+	AuthAttributes string // X-Apple-Auth-Attributes from response
 }
 
 // RLock acquires a read lock on the session

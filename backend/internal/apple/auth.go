@@ -49,26 +49,66 @@ func (a *AppleAuth) GetSession() *Session {
 	return a.session
 }
 
-// iCloudOAuthKey is the iCloud.com OAuth client ID used for SRP auth
-// This matches the working Python implementation
-const iCloudOAuthKey = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
+// generateOAuthState generates a random OAuth state string like browser does
+func generateOAuthState() string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 32)
+	for i := range b {
+		b[i] = chars[time.Now().UnixNano()%int64(len(chars))]
+		time.Sleep(time.Nanosecond)
+	}
+	return "auth-" + string(b[:8]) + "-" + string(b[8:12]) + "-" + string(b[12:16]) + "-" + string(b[16:20]) + "-" + string(b[20:28])
+}
 
-// common headers for auth requests
+// generateFDClientInfo generates device fingerprint JSON like browser
+func generateFDClientInfo() string {
+	return `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`
+}
+
+// common headers for auth requests - using account.apple.com config (not iCloud)
 func (a *AppleAuth) authHeaders() map[string]string {
+	a.session.mu.Lock()
+	if a.session.OAuthState == "" {
+		a.session.OAuthState = generateOAuthState()
+	}
+	oauthState := a.session.OAuthState
+	a.session.mu.Unlock()
+
 	headers := map[string]string{
-		"Content-Type":                      "application/json",
-		"Accept":                            "application/json, text/javascript",
-		"User-Agent":                        ChromeUA,
-		"X-Apple-OAuth-Client-Id":           iCloudOAuthKey,
-		"X-Apple-OAuth-Client-Type":         "firstPartyAuth",
-		"X-Apple-OAuth-Redirect-URI":        "https://www.icloud.com",
-		"X-Apple-OAuth-Require-Grant-Code":  "true",
-		"X-Apple-OAuth-Response-Mode":       "web_message",
-		"X-Apple-OAuth-Response-Type":       "code",
-		"X-Apple-Widget-Key":                iCloudOAuthKey,
-		"X-Requested-With":                  "XMLHttpRequest",
-		"Origin":                            "https://www.icloud.com",
-		"Referer":                           "https://www.icloud.com/",
+		// Basic headers
+		"Content-Type":   "application/json",
+		"Accept":         "application/json, text/plain, */*",
+		"User-Agent":     ChromeUA,
+		"Origin":         "https://idmsa.apple.com",
+		"Referer":        "https://idmsa.apple.com/",
+		"Accept-Language": "zh-CN,zh;q=0.9",
+		
+		// OAuth headers - CRITICAL for myacinfo cookie
+		"X-Apple-Widget-Key":         AuthWidgetKey,
+		"X-Apple-OAuth-Client-Id":    AuthWidgetKey,
+		"X-Apple-OAuth-Client-Type":  "firstPartyAuth",
+		"X-Apple-OAuth-Redirect-URI": "https://account.apple.com",
+		"X-Apple-OAuth-Response-Mode": "web_message",
+		"X-Apple-OAuth-Response-Type": "code",
+		"X-Apple-OAuth-State":        oauthState,
+		"X-Apple-App-Id":             AuthWidgetKey,
+		"X-Apple-Frame-Id":           oauthState,
+		
+		// Domain and privacy headers
+		"X-Apple-Domain-Id":               "11",
+		"X-Apple-Privacy-Consent":         "true",
+		"X-Apple-Privacy-Consent-Accepted": "true",
+		
+		// Device fingerprint
+		"X-Apple-I-FD-Client-Info": generateFDClientInfo(),
+		
+		// Security headers
+		"Sec-Ch-Ua":          `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`,
+		"Sec-Ch-Ua-Mobile":   "?0",
+		"Sec-Ch-Ua-Platform": `"Windows"`,
+		"Sec-Fetch-Dest":     "empty",
+		"Sec-Fetch-Mode":     "cors",
+		"Sec-Fetch-Site":     "same-origin",
 	}
 	
 	a.session.mu.RLock()
@@ -77,6 +117,9 @@ func (a *AppleAuth) authHeaders() map[string]string {
 	}
 	if a.session.SessionID != "" {
 		headers["X-Apple-ID-Session-Id"] = a.session.SessionID
+	}
+	if a.session.AuthAttributes != "" {
+		headers["X-Apple-Auth-Attributes"] = a.session.AuthAttributes
 	}
 	a.session.mu.RUnlock()
 	
@@ -128,7 +171,36 @@ func (a *AppleAuth) captureSessionHeaders(resp *http.Response) {
 	if token := resp.Header.Get("X-Apple-Session-Token"); token != "" {
 		a.session.SessionToken = token
 	}
+	// Capture auth attributes - CRITICAL for 2FA requests to return myacinfo
+	if authAttr := resp.Header.Get("X-Apple-Auth-Attributes"); authAttr != "" {
+		a.session.AuthAttributes = authAttr
+		log.Printf("[CaptureHeaders] Got X-Apple-Auth-Attributes (len=%d)", len(authAttr))
+	}
 	a.session.LastActivity = time.Now()
+
+	// CRITICAL: Capture myacinfo cookie and set it on ALL Apple domains
+	// Go's cookie jar may not properly handle Domain=apple.com for subdomains
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "myacinfo" && cookie.Value != "" {
+			log.Printf("[CaptureHeaders] Found myacinfo cookie (len=%d), setting on all Apple domains", len(cookie.Value))
+			// Set on all relevant Apple domains
+			domains := []string{
+				"https://apple.com",
+				"https://appleid.apple.com",
+				"https://idmsa.apple.com",
+				"https://account.apple.com",
+			}
+			for _, domain := range domains {
+				u, _ := url.Parse(domain)
+				a.session.Client.Jar.SetCookies(u, []*http.Cookie{{
+					Name:  "myacinfo",
+					Value: cookie.Value,
+					Path:  "/",
+				}})
+			}
+			log.Printf("[CaptureHeaders] myacinfo set on %d domains", len(domains))
+		}
+	}
 }
 
 // Federate performs federation check
