@@ -7,17 +7,19 @@ import {
   ClipboardCopy, Loader2,
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
+import Pagination from '@/components/ui/Pagination'
 import { cn } from '@/lib/cn'
 
 export default function EmailsPage() {
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
   const [copiedId, setCopiedId] = useState<number | null>(null)
 
   const { data, isLoading } = useQuery({
-    queryKey: ['all-hme', page, search],
-    queryFn: () => api.listAllHME(page, 20, search),
+    queryKey: ['all-hme', page, pageSize, search],
+    queryFn: () => api.listAllHME(page, pageSize, search),
   })
 
   const list = data?.data?.list || []
@@ -214,17 +216,19 @@ export default function EmailsPage() {
           </div>
 
           {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex justify-center items-center gap-4 mt-6">
-              <Button size="sm" variant="outline" disabled={page === 1} onClick={() => setPage((p) => p - 1)}>
-                上一页
-              </Button>
-              <span className="text-[13px] text-gray-500 tabular-nums font-medium">
-                {page} <span className="text-gray-300 mx-0.5">/</span> {totalPages}
-              </span>
-              <Button size="sm" variant="outline" disabled={page === totalPages} onClick={() => setPage((p) => p + 1)}>
-                下一页
-              </Button>
+          {totalPages > 0 && (
+            <div className="mt-4">
+              <Pagination
+                currentPage={page}
+                totalPages={totalPages}
+                totalItems={total}
+                pageSize={pageSize}
+                onPageChange={setPage}
+                onPageSizeChange={(size) => {
+                  setPageSize(size)
+                  setPage(1)
+                }}
+              />
             </div>
           )}
         </>

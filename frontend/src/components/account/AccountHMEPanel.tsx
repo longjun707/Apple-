@@ -1,10 +1,11 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, type AppleAccount, type HMEEmail } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import { Loader2, ArrowLeft, RefreshCw } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog'
+import Pagination from '@/components/ui/Pagination'
 import StatsBar from '@/components/email/StatsBar'
 import SearchBar, { type FilterStatus } from '@/components/email/SearchBar'
 import EmailItem from '@/components/email/EmailItem'
@@ -23,6 +24,8 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
   const [searchQuery, setSearchQuery] = useState('')
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all')
   const [deleteTarget, setDeleteTarget] = useState<HMEEmail | null>(null)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
   const queryClient = useQueryClient()
 
   // ---- Data ----
@@ -68,6 +71,18 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
       return true
     })
   }, [hmeList, searchQuery, filterStatus])
+
+  // ---- Pagination ----
+  const totalPages = Math.ceil(filteredList.length / pageSize)
+  const paginatedList = useMemo(() => {
+    const start = (currentPage - 1) * pageSize
+    return filteredList.slice(start, start + pageSize)
+  }, [filteredList, currentPage, pageSize])
+
+  // Reset to page 1 when filter/search changes
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, filterStatus])
 
   const isFiltered = searchQuery !== '' || filterStatus !== 'all'
 
@@ -170,16 +185,34 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
           {filteredList.length === 0 ? (
             <EmptyState isFiltered={isFiltered} />
           ) : (
-            <div className="divide-y divide-gray-50">
-              {filteredList.map((email: HMEEmail) => (
-                <EmailItem
-                  key={email.id}
-                  email={email}
-                  onCopy={handleCopy}
-                  onDelete={setDeleteTarget}
-                />
-              ))}
-            </div>
+            <>
+              <div className="divide-y divide-gray-50">
+                {paginatedList.map((email: HMEEmail) => (
+                  <EmailItem
+                    key={email.id}
+                    email={email}
+                    onCopy={handleCopy}
+                    onDelete={setDeleteTarget}
+                  />
+                ))}
+              </div>
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="border-t border-gray-100">
+                  <Pagination
+                    currentPage={currentPage}
+                    totalPages={totalPages}
+                    totalItems={filteredList.length}
+                    pageSize={pageSize}
+                    onPageChange={setCurrentPage}
+                    onPageSizeChange={(size) => {
+                      setPageSize(size)
+                      setCurrentPage(1)
+                    }}
+                  />
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
