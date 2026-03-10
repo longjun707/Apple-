@@ -9,12 +9,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
 )
+
+var srpLog *log.Logger
+
+func init() {
+	// 使用绝对路径确保热更新时日志写入正确位置
+	logPath := `D:\DM\apple隐私邮箱创建\apple-hme-manager\backend\srp_debug.log`
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		srpLog = log.New(os.Stderr, "[SRP] ", log.LstdFlags)
+	} else {
+		srpLog = log.New(f, "[SRP] ", log.LstdFlags)
+	}
+}
 
 // AppleAuth handles Apple ID authentication
 type AppleAuth struct {
@@ -34,23 +49,26 @@ func (a *AppleAuth) GetSession() *Session {
 	return a.session
 }
 
+// iCloudOAuthKey is the iCloud.com OAuth client ID used for SRP auth
+// This matches the working Python implementation
+const iCloudOAuthKey = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
+
 // common headers for auth requests
 func (a *AppleAuth) authHeaders() map[string]string {
 	headers := map[string]string{
-		"Content-Type":           "application/json",
-		"Accept":                 "application/json",
-		"X-Apple-Widget-Key":     AuthWidgetKey,
-		"Origin":                 "https://account.apple.com",
-		"Referer":                "https://account.apple.com/",
-		"User-Agent":             ChromeUA,
-		"sec-ch-ua":              `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`,
-		"sec-ch-ua-mobile":       "?0",
-		"sec-ch-ua-platform":     `"Windows"`,
-		"sec-fetch-dest":         "empty",
-		"sec-fetch-mode":         "cors",
-		"sec-fetch-site":         "same-site",
-		"X-Apple-I-Timezone":     "Asia/Shanghai",
-		"X-Apple-I-FD-Client-Info": `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`,
+		"Content-Type":                      "application/json",
+		"Accept":                            "application/json, text/javascript",
+		"User-Agent":                        ChromeUA,
+		"X-Apple-OAuth-Client-Id":           iCloudOAuthKey,
+		"X-Apple-OAuth-Client-Type":         "firstPartyAuth",
+		"X-Apple-OAuth-Redirect-URI":        "https://www.icloud.com",
+		"X-Apple-OAuth-Require-Grant-Code":  "true",
+		"X-Apple-OAuth-Response-Mode":       "web_message",
+		"X-Apple-OAuth-Response-Type":       "code",
+		"X-Apple-Widget-Key":                iCloudOAuthKey,
+		"X-Requested-With":                  "XMLHttpRequest",
+		"Origin":                            "https://www.icloud.com",
+		"Referer":                           "https://www.icloud.com/",
 	}
 	
 	a.session.mu.RLock()
@@ -132,9 +150,6 @@ func (a *AppleAuth) Federate(username string) error {
 
 // Login performs SRP login
 func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
-	// Step 0: Federate
-	a.Federate(username)
-
 	// Step 1: Create SRP client
 	srpClient, err := NewSRPClient(ModeGSA, HashSHA256, 2048)
 	if err != nil {
@@ -166,6 +181,8 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&initResp); err != nil {
 		return nil, fmt.Errorf("failed to decode init response: %w", err)
 	}
+	srpLog.Printf("init ok: protocol=%s, iteration=%d, salt_len=%d, B_len=%d",
+		initResp.Protocol, initResp.Iteration, len(initResp.Salt), len(initResp.B))
 
 	// Step 3: Handle Hashcash challenge
 	hcToken := ""
@@ -193,6 +210,8 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 
 	derivedKey := pbkdf2.Key(passKey, saltBytes, initResp.Iteration, 32, sha256.New)
 	srpClient.SetPassword(derivedKey)
+	srpLog.Printf("password derived: protocol=%s, key_len=%d, salt_hex=%s, dk_hex=%s",
+		initResp.Protocol, len(derivedKey), hex.EncodeToString(saltBytes), hex.EncodeToString(derivedKey[:8]))
 
 	// Step 5: Generate proof
 	serverB, err := base64.StdEncoding.DecodeString(initResp.B)
@@ -205,6 +224,9 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 		return nil, fmt.Errorf("failed to generate proof: %w", err)
 	}
 
+	srpLog.Printf("M1_hex=%s", m1Hex)
+	srpLog.Printf("K_hex=%s, A_len=%d, B_len=%d",
+		hex.EncodeToString(srpClient.K[:8]), len(srpClient.A.Bytes()), len(serverB))
 	m1Bytes, _ := hex.DecodeString(m1Hex)
 	m1B64 := base64.StdEncoding.EncodeToString(m1Bytes)
 	m2B64 := base64.StdEncoding.EncodeToString(srpClient.GenerateM2())
@@ -231,12 +253,14 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 		req.Header.Set(k, v)
 	}
 
+	srpLog.Printf("sending complete: m1_len=%d, m2_len=%d", len(m1B64), len(m2B64))
 	resp, err = a.session.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("complete request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	a.captureSessionHeaders(resp)
+	srpLog.Printf("complete response: status=%d", resp.StatusCode)
 
 	switch resp.StatusCode {
 	case 200:
@@ -247,10 +271,36 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 		return &LoginResult{State: AuthStateAuthenticated, Message: "Login successful"}, nil
 
 	case 409:
-		return &LoginResult{State: AuthStateNeeds2FA, Requires2FA: true, Message: "2FA required"}, nil
+		// Parse phone numbers from 409 response
+		var twoFAInfo struct {
+			TrustedPhoneNumbers []struct {
+				ID                 int    `json:"id"`
+				NumberWithDialCode string `json:"numberWithDialCode"`
+				ObfuscatedNumber   string `json:"obfuscatedNumber"`
+				PushMode           string `json:"pushMode"`
+			} `json:"trustedPhoneNumbers"`
+		}
+		resBody, _ := io.ReadAll(resp.Body)
+		json.Unmarshal(resBody, &twoFAInfo)
+		srpLog.Printf("409 2FA info: %s", string(resBody))
+
+		result := &LoginResult{State: AuthStateNeeds2FA, Requires2FA: true, Message: "2FA required"}
+		for _, p := range twoFAInfo.TrustedPhoneNumbers {
+			number := p.NumberWithDialCode
+			if number == "" {
+				number = p.ObfuscatedNumber
+			}
+			result.PhoneNumbers = append(result.PhoneNumbers, struct {
+				ID                 int    `json:"id"`
+				NumberWithDialCode string `json:"numberWithDialCode"`
+			}{ID: p.ID, NumberWithDialCode: number})
+		}
+		return result, nil
 
 	case 401:
-		return nil, fmt.Errorf("SRP verification failed (m1/m2 mismatch)")
+		respBody, _ := io.ReadAll(resp.Body)
+		srpLog.Printf("401 response body: %s", string(respBody))
+		return nil, fmt.Errorf("SRP verification failed: %s", string(respBody))
 
 	case 403:
 		return nil, fmt.Errorf("wrong password or account locked")

@@ -13,14 +13,22 @@ import (
 
 // AdminLoginRequest represents admin login request
 type AdminLoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username   string `json:"username" binding:"required"`
+	Password   string `json:"password" binding:"required"`
+	RememberMe bool   `json:"rememberMe"`
 }
 
-// AccountRequest represents account create/update request
+// AccountRequest represents account create request
 type AccountRequest struct {
 	AppleID  string `json:"appleId" binding:"required"`
 	Password string `json:"password" binding:"required"`
+	Remark   string `json:"remark"`
+}
+
+// UpdateAccountRequest represents account update request (password is optional)
+type UpdateAccountRequest struct {
+	AppleID  string `json:"appleId" binding:"required"`
+	Password string `json:"password"` // 留空则不修改
 	Remark   string `json:"remark"`
 }
 
@@ -56,6 +64,7 @@ func (s *Server) AdminLogin(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
 	session.AdminID = admin.ID
 	session.AdminName = admin.Username
+	session.RememberMe = req.RememberMe
 
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
@@ -174,7 +183,7 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 		return
 	}
 
-	var req AccountRequest
+	var req UpdateAccountRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -274,8 +283,9 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 		c.JSON(http.StatusOK, APIResponse{
 			Success: true,
 			Data: map[string]interface{}{
-				"requires2fa": true,
-				"message":     "需要2FA验证",
+				"requires2fa":  true,
+				"message":      "需要2FA验证",
+				"phoneNumbers": result.PhoneNumbers,
 			},
 		})
 		return
@@ -334,6 +344,30 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]bool{"authenticated": true}})
+}
+
+// RequestSMSForAccount requests SMS 2FA code for an Apple account
+func (s *Server) RequestSMSForAccount(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+	if session.AdminID == 0 || session.Auth == nil {
+		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录或会话已过期"})
+		return
+	}
+
+	var req struct {
+		PhoneID int `json:"phoneId"`
+	}
+	c.ShouldBindJSON(&req)
+	if req.PhoneID == 0 {
+		req.PhoneID = 1
+	}
+
+	if err := session.Auth.RequestSMSCode(req.PhoneID); err != nil {
+		c.JSON(http.StatusOK, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]string{"message": "短信已发送"}})
 }
 
 // GetAccountHME gets HME list for an account

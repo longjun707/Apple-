@@ -18,12 +18,13 @@ type Server struct {
 
 // SessionState holds per-session state
 type SessionState struct {
-	Auth      *apple.AppleAuth
-	HME       *apple.HMEClient
-	AccountID uint   // Database account ID (Apple account)
-	AppleID   string // Apple ID email
-	AdminID   uint   // Admin user ID
-	AdminName string // Admin username
+	Auth       *apple.AppleAuth
+	HME        *apple.HMEClient
+	AccountID  uint   // Database account ID (Apple account)
+	AppleID    string // Apple ID email
+	AdminID    uint   // Admin user ID
+	AdminName  string // Admin username
+	RememberMe bool   // Whether to keep session longer
 }
 
 // NewServer creates a new API server

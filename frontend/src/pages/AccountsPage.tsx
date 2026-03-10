@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api, type AppleAccount } from '@/api/client'
+import { api, type AppleAccount, type PhoneNumber } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
   Plus, Trash2, LogIn, Mail, RefreshCw,
@@ -20,6 +20,7 @@ export default function AccountsPage() {
   const [deleteTarget, setDeleteTarget] = useState<AppleAccount | null>(null)
   const [selectedAccount, setSelectedAccount] = useState<AppleAccount | null>(null)
   const [twoFAAccountId, setTwoFAAccountId] = useState<number | null>(null)
+  const [twoFAPhones, setTwoFAPhones] = useState<PhoneNumber[]>([])
 
   // ---- Data ----
   const { data, isLoading, refetch } = useQuery({
@@ -42,6 +43,7 @@ export default function AccountsPage() {
       }
       if (res.data?.requires2fa) {
         setTwoFAAccountId(id)
+        setTwoFAPhones(res.data?.phoneNumbers || [])
       } else {
         toast.success('Apple 账户登录成功')
         const account = accounts.find((a) => a.id === id)
@@ -219,6 +221,7 @@ export default function AccountsPage() {
       <TwoFAModal
         open={twoFAAccountId !== null}
         accountId={twoFAAccountId}
+        phoneNumbers={twoFAPhones}
         onClose={() => setTwoFAAccountId(null)}
         onSuccess={() => {
           const account = accounts.find((a) => a.id === twoFAAccountId)

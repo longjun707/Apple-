@@ -73,6 +73,7 @@ func main() {
 			accounts.DELETE("/:id", server.DeleteAccount)
 			accounts.POST("/:id/login", server.LoginAppleAccount)
 			accounts.POST("/:id/2fa", server.Verify2FAForAccount)
+			accounts.POST("/:id/request-sms", server.RequestSMSForAccount)
 			accounts.GET("/:id/hme", server.GetAccountHME)
 			accounts.POST("/:id/hme", server.CreateAccountHME)
 		accounts.POST("/:id/hme/batch", server.BatchCreateAccountHME)

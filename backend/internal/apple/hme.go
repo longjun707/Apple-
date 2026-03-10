@@ -90,25 +90,94 @@ func (c *HMEClient) Bootstrap() error {
 		return nil
 	}
 
+	// Step 0: Exchange idmsa session for account.apple.com session
+	// This is required because SRP auth sets cookies on idmsa.apple.com,
+	// but HME APIs need account.apple.com session
+	if err := c.exchangeAccountSession(); err != nil {
+		srpLog.Printf("[HME] account session exchange warning: %v", err)
+		// Continue anyway - cookies might already be valid
+	}
+
 	// Ensure myacinfo cookie exists
 	c.ensureMyacinfo()
+
+	// Log cookies for debugging
+	c.logCookies()
 
 	// Step 1: Bootstrap portal
 	resp, err := c.doRequest("GET", BootstrapURL, nil, false)
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	srpLog.Printf("[HME] bootstrap status=%d, body_len=%d", resp.StatusCode, len(body))
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("bootstrap failed: HTTP %d - %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+	}
 
 	// Step 2: Token exchange
 	resp, err = c.doRequest("GET", TokenURL, nil, false)
 	if err != nil {
 		return fmt.Errorf("token exchange failed: %w", err)
 	}
+	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
+	srpLog.Printf("[HME] token exchange status=%d, body_len=%d", resp.StatusCode, len(body))
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("token exchange failed: HTTP %d - %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+	}
 
 	c.bootstrapped = true
+	srpLog.Printf("[HME] bootstrap complete")
 	return nil
+}
+
+// exchangeAccountSession exchanges idmsa session for account.apple.com session
+func (c *HMEClient) exchangeAccountSession() error {
+	authURL := AuthBase + "/authorize/signin?" +
+		"client_id=" + HMEWidgetKey +
+		"&redirect_uri=https://account.apple.com" +
+		"&response_type=code" +
+		"&response_mode=web_message"
+
+	headers := c.auth.authHeaders()
+	headers["X-Apple-OAuth-Client-Id"] = HMEWidgetKey
+	headers["X-Apple-OAuth-Redirect-URI"] = "https://account.apple.com"
+	headers["X-Apple-Widget-Key"] = HMEWidgetKey
+
+	req, _ := http.NewRequest("GET", authURL, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.auth.session.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("account session exchange failed: %w", err)
+	}
+	defer resp.Body.Close()
+	c.auth.captureSessionHeaders(resp)
+	srpLog.Printf("[HME] account session exchange: status=%d", resp.StatusCode)
+	return nil
+}
+
+// logCookies logs relevant cookies for debugging
+func (c *HMEClient) logCookies() {
+	domains := []string{"https://apple.com", "https://idmsa.apple.com", "https://appleid.apple.com", "https://account.apple.com"}
+	for _, d := range domains {
+		u, _ := url.Parse(d)
+		cookies := c.auth.session.Client.Jar.Cookies(u)
+		names := make([]string, 0, len(cookies))
+		for _, ck := range cookies {
+			names = append(names, ck.Name)
+		}
+		if len(names) > 0 {
+			srpLog.Printf("[HME] cookies for %s: %v", d, names)
+		}
+	}
+	c.auth.session.mu.RLock()
+	srpLog.Printf("[HME] SessionToken=%v, SCNT=%v", c.auth.session.SessionToken != "", c.auth.session.SCNT != "")
+	c.auth.session.mu.RUnlock()
 }
 
 // ensureMyacinfo sets myacinfo cookie if we have session token

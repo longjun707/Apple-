@@ -39,9 +39,15 @@ export interface AccountListResult {
   pageSize: number
 }
 
+export interface PhoneNumber {
+  id: number
+  numberWithDialCode: string
+}
+
 export interface AppleLoginResult {
   requires2fa: boolean
   message?: string
+  phoneNumbers?: PhoneNumber[]
 }
 
 export interface HMEEmail {
@@ -138,8 +144,8 @@ async function request<T>(
 
 export const api = {
   // Admin Auth
-  adminLogin: (username: string, password: string) =>
-    request<AdminInfo>('POST', '/admin/login', { username, password }),
+  adminLogin: (username: string, password: string, rememberMe = false) =>
+    request<AdminInfo>('POST', '/admin/login', { username, password, rememberMe }),
 
   adminLogout: () => request('POST', '/admin/logout'),
 
@@ -162,6 +168,9 @@ export const api = {
 
   verify2FAForAccount: (id: number, code: string, method: 'device' | 'sms' = 'device', phoneId?: number) =>
     request('POST', `/accounts/${id}/2fa`, { code, method, phoneId }),
+
+  requestSMSForAccount: (id: number, phoneId = 1) =>
+    request('POST', `/accounts/${id}/request-sms`, { phoneId }),
 
   getAccountHME: (id: number) =>
     request<HMEEmail[]>('GET', `/accounts/${id}/hme`),

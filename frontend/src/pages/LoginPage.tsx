@@ -8,12 +8,13 @@ import Button from '@/components/ui/Button'
 export default function LoginPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [rememberMe, setRememberMe] = useState(true)
   const [error, setError] = useState('')
 
   const { setState, setAdmin } = useAuthStore()
 
   const loginMutation = useMutation({
-    mutationFn: () => api.adminLogin(username, password),
+    mutationFn: () => api.adminLogin(username, password, rememberMe),
     onSuccess: (res) => {
       if (!res.success) {
         setError(res.error || '登录失败')
@@ -93,6 +94,16 @@ export default function LoginPage() {
                 {error}
               </div>
             )}
+
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-300 text-apple-blue focus:ring-apple-blue/30"
+              />
+              <span className="text-sm text-gray-600">保持登录状态</span>
+            </label>
 
             <Button
               type="submit"
