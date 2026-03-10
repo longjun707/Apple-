@@ -286,6 +286,13 @@ func (s *Server) CreateAccount(c *gin.Context) {
 		return
 	}
 
+	// Check if account already exists
+	var existing store.Account
+	if err := store.DB.Where("apple_id = ?", req.AppleID).First(&existing).Error; err == nil {
+		c.JSON(http.StatusOK, APIResponse{Success: false, Error: "该 Apple ID 已存在"})
+		return
+	}
+
 	account := &store.Account{
 		AppleID:  req.AppleID,
 		Password: store.EncryptPassword(req.Password),
