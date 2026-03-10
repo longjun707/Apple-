@@ -10,6 +10,7 @@ import SearchBar, { type FilterStatus } from '@/components/email/SearchBar'
 import EmailItem from '@/components/email/EmailItem'
 import EmptyState from '@/components/email/EmptyState'
 import BatchCreateModal from '@/components/email/BatchCreateModal'
+import CreateEmailModal from '@/components/email/CreateEmailModal'
 
 interface AccountHMEPanelProps {
   account: AppleAccount
@@ -18,6 +19,7 @@ interface AccountHMEPanelProps {
 
 export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProps) {
   const [showBatchModal, setShowBatchModal] = useState(false)
+  const [showCreateModal, setShowCreateModal] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all')
   const [deleteTarget, setDeleteTarget] = useState<HMEEmail | null>(null)
@@ -36,19 +38,6 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
   const hmeList = data || []
 
   // ---- Mutations ----
-  const createMutation = useMutation({
-    mutationFn: () => api.createAccountHME(account.id),
-    onSuccess: (res) => {
-      if (res.success) {
-        queryClient.invalidateQueries({ queryKey: ['account-hme', account.id] })
-        toast.success('邮箱创建成功')
-      } else {
-        toast.error(res.error || '创建失败')
-      }
-    },
-    onError: () => toast.error('网络错误'),
-  })
-
   const deleteMutation = useMutation({
     mutationFn: (hmeId: string) => api.deleteAccountHME(account.id, hmeId),
     onSuccess: (res) => {
@@ -146,8 +135,8 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
       <div className="mb-5">
         <StatsBar
           total={hmeList.length}
-          isCreating={createMutation.isPending}
-          onCreate={() => createMutation.mutate()}
+          isCreating={false}
+          onCreate={() => setShowCreateModal(true)}
           onBatchCreate={() => setShowBatchModal(true)}
           onCopyAll={handleCopyAll}
           onExport={handleExport}
@@ -196,6 +185,12 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
       )}
 
       {/* Modals */}
+      <CreateEmailModal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        accountId={account.id}
+      />
+
       <BatchCreateModal
         open={showBatchModal}
         onClose={() => setShowBatchModal(false)}

@@ -12,9 +12,15 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Load .env file if present
+	if err := godotenv.Load(); err != nil {
+		log.Println("ℹ️  No .env file found, using environment variables")
+	}
+
 	port := flag.Int("port", 8080, "Server port")
 	debug := flag.Bool("debug", false, "Enable debug mode")
 	noDb := flag.Bool("no-db", false, "Disable database")

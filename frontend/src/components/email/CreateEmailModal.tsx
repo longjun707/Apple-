@@ -1,25 +1,35 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, XCircle, Layers, Loader2, ChevronDown } from 'lucide-react'
-import { api, type BatchCreateResult } from '@/api/client'
+import { Mail, Loader2, ChevronDown } from 'lucide-react'
+import { api, type HMEEmail } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import Modal from '@/components/ui/Modal'
 import Button from '@/components/ui/Button'
 
-interface BatchCreateModalProps {
+interface CreateEmailModalProps {
   open: boolean
   onClose: () => void
   accountId: number
 }
 
-export default function BatchCreateModal({ open, onClose, accountId }: BatchCreateModalProps) {
-  const [count, setCount] = useState(5)
-  const [prefix, setPrefix] = useState('Auto')
+export default function CreateEmailModal({ open, onClose, accountId }: CreateEmailModalProps) {
+  const [label, setLabel] = useState('')
+  const [note, setNote] = useState('')
   const [forwardTo, setForwardTo] = useState('')
-  const [result, setResult] = useState<BatchCreateResult | null>(null)
+  const [createdEmail, setCreatedEmail] = useState<HMEEmail | null>(null)
   const queryClient = useQueryClient()
 
-  // Fetch forward emails
+  // Reset form when modal opens
+  useEffect(() => {
+    if (open) {
+      setLabel('')
+      setNote('')
+      setForwardTo('')
+      setCreatedEmail(null)
+    }
+  }, [open])
+
+  // Fetch available forward-to emails
   const { data: forwardEmails, isLoading: loadingForward } = useQuery({
     queryKey: ['forward-emails', accountId],
     queryFn: async () => {
@@ -31,78 +41,83 @@ export default function BatchCreateModal({ open, onClose, accountId }: BatchCrea
     staleTime: 60_000,
   })
 
-  // Auto-select first
+  // Auto-select first forward email
   useEffect(() => {
     if (forwardEmails?.length && !forwardTo) {
       setForwardTo(forwardEmails[0])
     }
   }, [forwardEmails, forwardTo])
 
-  // Reset form when modal opens
-  useEffect(() => {
-    if (open) {
-      setCount(5)
-      setPrefix('Auto')
-      setForwardTo('')
-      setResult(null)
-    }
-  }, [open])
-
   const mutation = useMutation({
-    mutationFn: () => api.batchCreateAccountHME(accountId, count, prefix, 1000, forwardTo || undefined),
+    mutationFn: () =>
+      api.createAccountHME(accountId, label || undefined, note || undefined, forwardTo || undefined),
     onSuccess: (res) => {
       if (res.success && res.data) {
-        setResult(res.data)
+        setCreatedEmail(res.data)
         queryClient.invalidateQueries({ queryKey: ['account-hme', accountId] })
-        toast.success(`成功创建 ${res.data.success} 个邮箱`)
+        queryClient.invalidateQueries({ queryKey: ['accounts'] })
+        toast.success('邮箱创建成功')
       } else {
-        toast.error(res.error || '批量创建失败')
+        toast.error(res.error || '创建失败')
       }
     },
     onError: () => toast.error('网络错误'),
   })
 
   const handleClose = () => {
-    setResult(null)
     mutation.reset()
     onClose()
+  }
+
+  const handleCopy = async () => {
+    if (!createdEmail) return
+    try {
+      await navigator.clipboard.writeText(createdEmail.emailAddress)
+      toast.success('已复制到剪贴板')
+    } catch {
+      toast.error('复制失败')
+    }
   }
 
   return (
     <Modal open={open} onClose={handleClose}>
       <div className="p-6">
+        {/* Header */}
         <div className="flex items-center gap-3 mb-5">
           <div className="w-10 h-10 rounded-full bg-apple-blue/10 flex items-center justify-center">
-            <Layers className="w-5 h-5 text-apple-blue" />
+            <Mail className="w-5 h-5 text-apple-blue" />
           </div>
-          <h2 className="text-lg font-semibold text-gray-900">批量创建</h2>
+          <h2 className="text-lg font-semibold text-gray-900">创建隐藏邮箱</h2>
         </div>
 
-        {!result ? (
+        {!createdEmail ? (
           <>
             <div className="space-y-4">
+              {/* Label */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">数量</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={count}
-                  onChange={(e) => setCount(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
-                  className="input"
-                />
-                <p className="text-xs text-gray-400 mt-1">最多 100 个</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">标签前缀</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">标签</label>
                 <input
                   type="text"
-                  value={prefix}
-                  onChange={(e) => setPrefix(e.target.value)}
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
                   className="input"
-                  placeholder="Auto"
+                  placeholder="留空则自动生成"
                 />
               </div>
+
+              {/* Note */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">备注</label>
+                <input
+                  type="text"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  className="input"
+                  placeholder="留空则自动生成"
+                />
+              </div>
+
+              {/* Forward To */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">转发到</label>
                 {loadingForward ? (
@@ -132,6 +147,8 @@ export default function BatchCreateModal({ open, onClose, accountId }: BatchCrea
                 )}
               </div>
             </div>
+
+            {/* Actions */}
             <div className="flex gap-3 mt-6">
               <Button variant="secondary" onClick={handleClose} className="flex-1">
                 取消
@@ -140,41 +157,41 @@ export default function BatchCreateModal({ open, onClose, accountId }: BatchCrea
                 onClick={() => mutation.mutate()}
                 loading={mutation.isPending}
                 className="flex-1"
+                icon={<Mail className="w-4 h-4" />}
               >
-                创建 {count} 个
+                创建
               </Button>
             </div>
           </>
         ) : (
           <>
-            <div className="space-y-3">
-              <div className="flex items-center gap-3 p-3 bg-green-50 rounded-xl">
-                <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />
-                <span className="text-sm text-green-800 font-medium">
-                  成功: {result.success} 个
-                </span>
+            {/* Success state */}
+            <div className="bg-green-50 rounded-xl p-4 mb-4">
+              <p className="text-sm text-green-800 font-medium mb-2">创建成功!</p>
+              <div className="flex items-center gap-2">
+                <code className="text-sm font-mono text-green-900 bg-green-100 px-2 py-1 rounded-lg flex-1 truncate">
+                  {createdEmail.emailAddress}
+                </code>
               </div>
-              {result.failed > 0 && (
-                <div className="flex items-center gap-3 p-3 bg-red-50 rounded-xl">
-                  <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
-                  <div>
-                    <span className="text-sm text-red-800 font-medium">
-                      失败: {result.failed} 个
-                    </span>
-                    {result.errors.length > 0 && (
-                      <ul className="mt-1 text-xs text-red-600 space-y-0.5">
-                        {result.errors.slice(0, 5).map((err, i) => (
-                          <li key={i}>· {err}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                </div>
+              {createdEmail.forwardToEmail && (
+                <p className="text-xs text-green-600 mt-2">
+                  转发到: {createdEmail.forwardToEmail}
+                </p>
+              )}
+              {createdEmail.label && (
+                <p className="text-xs text-green-600 mt-1">
+                  标签: {createdEmail.label}
+                </p>
               )}
             </div>
-            <Button variant="secondary" onClick={handleClose} className="w-full mt-5">
-              关闭
-            </Button>
+            <div className="flex gap-3">
+              <Button variant="secondary" onClick={handleCopy} className="flex-1">
+                复制邮箱
+              </Button>
+              <Button onClick={handleClose} className="flex-1">
+                完成
+              </Button>
+            </div>
           </>
         )}
       </div>
