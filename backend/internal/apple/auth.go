@@ -80,8 +80,30 @@ func generateOAuthState() string {
 }
 
 // generateFDClientInfo generates device fingerprint JSON like browser
+// The F field is a browser fingerprint that Apple uses for fraud detection
 func generateFDClientInfo() string {
-	return `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`
+	// Generate a random-ish but consistent fingerprint
+	// Format matches what Chrome sends: base64-encoded fingerprint data
+	fp := generateBrowserFingerprint()
+	return `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":"` + fp + `"}`
+}
+
+// generateBrowserFingerprint creates a browser fingerprint similar to what Apple's JS generates
+func generateBrowserFingerprint() string {
+	// This mimics the fingerprint format Apple expects
+	// Real browsers generate this from canvas, webgl, fonts, etc.
+	// We use a realistic-looking static fingerprint that changes slightly per session
+	randBytes := make([]byte, 16)
+	rand.Read(randBytes)
+	
+	// Build a fingerprint string similar to browser format
+	// Format: "Fla44j1e3NlY5BNlY5BSmHACVZXnNAA9..." 
+	base := "Fla44j1e3NlY5BNlY5BSmHACVZXnNAA9Zdd"
+	mid := fmt.Sprintf("%x", randBytes[:4])
+	tail := "azLu_dYV6Hycfx9MsFY5Bhw.Tf5.EKWJ9V68DA2uZjkmjsTclY5BNleBBNlYCa1nkBMfs"
+	randTail := fmt.Sprintf(".%x", randBytes[4:6])
+	
+	return base + mid + tail + randTail
 }
 
 // common headers for auth requests - using account.apple.com config (not iCloud)
@@ -457,8 +479,35 @@ func (a *AppleAuth) Verify2FASMS(phoneID int, code string) error {
 	return fmt.Errorf("SMS 2FA verification failed: HTTP %d - %s", resp.StatusCode, string(body))
 }
 
+// GetAuthState calls GET /auth to refresh session state before SMS request
+// This is critical - browser always calls this after login returns 409
+func (a *AppleAuth) GetAuthState() (int, error) {
+	resp, err := a.doRequest("GET", AuthBase, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	
+	// Read body to ensure cookies are captured
+	io.ReadAll(resp.Body)
+	
+	log.Printf("[GetAuthState] status=%d", resp.StatusCode)
+	return resp.StatusCode, nil
+}
+
 // RequestSMSCode requests a new SMS code
 func (a *AppleAuth) RequestSMSCode(phoneID int) error {
+	// CRITICAL: Call GET /auth first to refresh session state and get crsc cookie
+	authStatus, err := a.GetAuthState()
+	if err != nil {
+		log.Printf("[RequestSMSCode] GetAuthState error: %v", err)
+	}
+	
+	// 423 = account locked/needs device verification
+	if authStatus == 423 {
+		return fmt.Errorf("账户被锁定或需要在Apple设备上验证，请先在浏览器登录 account.apple.com 完成验证")
+	}
+	
 	req := map[string]interface{}{
 		"phoneNumber": map[string]int{"id": phoneID},
 		"mode":        "sms",
@@ -474,7 +523,16 @@ func (a *AppleAuth) RequestSMSCode(phoneID int) error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to request SMS code: HTTP %d", resp.StatusCode)
+	switch resp.StatusCode {
+	case 412:
+		return fmt.Errorf("请求被拒绝(412)，该账户可能被 Apple 风控限制，请先在浏览器登录一次")
+	case 423:
+		return fmt.Errorf("账户被锁定(423)，请在Apple设备上解锁后重试")
+	case 429:
+		return fmt.Errorf("请求过于频繁(429)，请稍后重试")
+	default:
+		return fmt.Errorf("发送验证码失败: HTTP %d", resp.StatusCode)
+	}
 }
 
 // trustDevice calls trust endpoint

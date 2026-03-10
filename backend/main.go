@@ -114,6 +114,9 @@ func main() {
 				accounts.DELETE("/:id/alternate-email", server.RemoveAlternateEmail)
 				// Family members
 				accounts.GET("/:id/family", server.GetFamilyMembers)
+				// Forward email settings
+				accounts.GET("/:id/forward-email", server.GetForwardEmailOptions)
+				accounts.PUT("/:id/forward-email", server.SetForwardEmail)
 			}
 		}
 

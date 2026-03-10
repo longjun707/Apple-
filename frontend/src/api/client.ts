@@ -131,6 +131,22 @@ export interface FamilyResponse {
   isMemberOfFamily: boolean
 }
 
+export interface ForwardEmailOption {
+  id: number
+  type: string // official, profile
+  address: string
+  vetted: boolean
+}
+
+export interface ForwardEmailResponse {
+  forwardToOptions: {
+    availableEmails: ForwardEmailOption[]
+    forwardToEmail?: {
+      address: string
+    }
+  }
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -257,6 +273,13 @@ export const api = {
   // Family members
   getFamilyMembers: (accountId: number) =>
     request<FamilyResponse>('GET', `/accounts/${accountId}/family`),
+
+  // Forward email settings
+  getForwardEmailOptions: (accountId: number) =>
+    request<ForwardEmailResponse>('GET', `/accounts/${accountId}/forward-email`),
+
+  setForwardEmail: (accountId: number, email: string) =>
+    request('PUT', `/accounts/${accountId}/forward-email`, { email }),
 
   // Health
   health: () => request('GET', '/health'),

@@ -846,3 +846,58 @@ func (c *HMEClient) RemoveAlternateEmail(email string) error {
 
 	return nil
 }
+
+// GetForwardEmailOptions returns available forward-to email options and current setting
+func (c *HMEClient) GetForwardEmailOptions() (*ForwardEmailResponse, error) {
+	if err := c.Bootstrap(); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doRequest("GET", AccountBase+"/forwardemail", nil)
+	if err != nil {
+		return nil, fmt.Errorf("get forward email options failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get forward email options failed: HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	var result ForwardEmailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	log.Printf("[ForwardEmail] Got %d available emails, current=%s",
+		len(result.ForwardToOptions.AvailableEmails),
+		func() string {
+			if result.ForwardToOptions.ForwardToEmail != nil {
+				return result.ForwardToOptions.ForwardToEmail.Address
+			}
+			return "none"
+		}())
+	return &result, nil
+}
+
+// SetForwardEmail sets the forward-to email address for HME
+func (c *HMEClient) SetForwardEmail(email string) error {
+	if err := c.Bootstrap(); err != nil {
+		return err
+	}
+
+	reqBody := map[string]string{"forwardToEmail": email}
+	resp, err := c.doRequest("PUT", AccountBase+"/forwardemail", reqBody)
+	if err != nil {
+		return fmt.Errorf("set forward email failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("set forward email failed: HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	log.Printf("[ForwardEmail] Set forward email to: %s", email)
+	return nil
+}

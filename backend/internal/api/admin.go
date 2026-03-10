@@ -1180,3 +1180,58 @@ func (s *Server) GetFamilyMembers(c *gin.Context) {
 
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: familyResp})
 }
+
+// GetForwardEmailOptions returns available forward-to email options
+func (s *Server) GetForwardEmailOptions(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+
+	if !ensureAppleSession(session, uint(id)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	result, err := session.HME.GetForwardEmailOptions()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: result})
+}
+
+// SetForwardEmail sets the forward-to email address
+func (s *Server) SetForwardEmail(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+
+	if !ensureAppleSession(session, uint(id)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	var req struct {
+		Email string `json:"email" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请选择转发邮箱"})
+		return
+	}
+
+	if err := session.HME.SetForwardEmail(req.Email); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true})
+}

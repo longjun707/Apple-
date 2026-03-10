@@ -138,13 +138,6 @@ type HMECreateRequest struct {
 	ForwardToEmail string `json:"forwardToEmail,omitempty"`
 }
 
-// ForwardEmailResponse represents forward email options
-type ForwardEmailResponse struct {
-	ForwardToOptions struct {
-		AvailableEmails []string `json:"availableEmails"`
-	} `json:"forwardToOptions"`
-}
-
 // ErrorResponse represents an API error
 type ErrorResponse struct {
 	ServiceErrors []ServiceError `json:"serviceErrors,omitempty"`
@@ -270,4 +263,25 @@ type AlternateEmailVerifyResponse struct {
 	Type    string `json:"type"`
 	Address string `json:"address"`
 	Vetted  bool   `json:"vetted"`
+}
+
+// ForwardEmailOption represents an available forward email address
+type ForwardEmailOption struct {
+	ID      int    `json:"id"`
+	Type    string `json:"type"` // official, profile
+	Address string `json:"address"`
+	Vetted  bool   `json:"vetted"`
+}
+
+// ForwardEmailInfo represents the current forward email setting
+type ForwardEmailInfo struct {
+	Address string `json:"address"`
+}
+
+// ForwardEmailResponse represents the forwardemail API response
+type ForwardEmailResponse struct {
+	ForwardToOptions struct {
+		AvailableEmails []ForwardEmailOption `json:"availableEmails"`
+		ForwardToEmail  *ForwardEmailInfo    `json:"forwardToEmail"`
+	} `json:"forwardToOptions"`
 }
