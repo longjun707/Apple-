@@ -102,6 +102,7 @@ func (c *HMEClient) hmeHeaders() map[string]string {
 		"Origin":                    "https://account.apple.com",
 		"Referer":                   "https://account.apple.com/",
 		"User-Agent":                ChromeUA,
+		"X-Apple-Api-Key":           HMEWidgetKey,
 		"X-Apple-I-Request-Context": "ca",
 		"X-Apple-I-Timezone":        "Asia/Shanghai",
 		"X-Apple-I-FD-Client-Info":  `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`,

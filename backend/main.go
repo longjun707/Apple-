@@ -91,6 +91,11 @@ func main() {
 				admin.GET("/stats", server.AdminStats)
 				admin.GET("/hme", server.AdminListAllHME)
 				admin.PUT("/password", server.AdminChangePassword)
+				// Auto HME task management
+				admin.GET("/auto-hme/status", server.GetAutoHMEStatus)
+				admin.GET("/auto-hme/logs", server.GetAutoHMELogs)
+				admin.PUT("/auto-hme/settings", server.UpdateAutoHMESettings)
+				admin.POST("/auto-hme/trigger", server.TriggerAutoHME)
 			}
 
 			// Apple Account management routes

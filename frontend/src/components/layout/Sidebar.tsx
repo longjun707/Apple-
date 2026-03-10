@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   PanelLeftClose,
   PanelLeftOpen,
+  Timer,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 
@@ -29,6 +30,7 @@ const menuItems: MenuItem[] = [
   { id: 'dashboard', label: '仪表盘', icon: <LayoutDashboard className="w-[18px] h-[18px]" /> },
   { id: 'accounts', label: 'Apple 账户', icon: <Users className="w-[18px] h-[18px]" /> },
   { id: 'emails', label: 'HME 邮箱', icon: <Mail className="w-[18px] h-[18px]" /> },
+  { id: 'auto-task', label: '自动任务', icon: <Timer className="w-[18px] h-[18px]" /> },
   { id: 'settings', label: '系统设置', icon: <Settings className="w-[18px] h-[18px]" /> },
 ]
 

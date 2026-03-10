@@ -283,6 +283,13 @@ export const api = {
 
   // Health
   health: () => request('GET', '/health'),
+
+  // Auto HME task
+  getAutoHMEStatus: () => request('GET', '/admin/auto-hme/status'),
+  getAutoHMELogs: () => request('GET', '/admin/auto-hme/logs'),
+  updateAutoHMESettings: (settings: { enabled?: boolean; intervalMinutes?: number; countPerAccount?: number }) =>
+    request('PUT', '/admin/auto-hme/settings', settings),
+  triggerAutoHME: () => request('POST', '/admin/auto-hme/trigger'),
 }
 
 export function clearSession() {

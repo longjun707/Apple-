@@ -6,6 +6,7 @@ import DashboardPage from '@/pages/DashboardPage'
 import AccountsPage from '@/pages/AccountsPage'
 import EmailsPage from '@/pages/EmailsPage'
 import SettingsPage from '@/pages/SettingsPage'
+import AutoTaskPage from '@/pages/AutoTaskPage'
 import Sidebar from '@/components/layout/Sidebar'
 import ToastContainer from '@/components/ui/Toast'
 import { toast } from '@/stores/toastStore'
@@ -82,6 +83,8 @@ function App() {
         return <AccountsPage />
       case 'emails':
         return <EmailsPage />
+      case 'auto-task':
+        return <AutoTaskPage />
       case 'settings':
         return <SettingsPage />
       default:
