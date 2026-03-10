@@ -23,21 +23,18 @@ func NewHMEClient(auth *AppleAuth) *HMEClient {
 	}
 }
 
-// hmeHeaders returns headers for HME API requests
-func (c *HMEClient) hmeHeaders(withAPIKey bool) map[string]string {
+// hmeHeaders returns headers for HME API requests (always includes API key like Python)
+func (c *HMEClient) hmeHeaders() map[string]string {
 	headers := map[string]string{
 		"Accept":                    "application/json",
 		"Content-Type":              "application/json",
 		"Origin":                    "https://account.apple.com",
 		"Referer":                   "https://account.apple.com/",
 		"User-Agent":                ChromeUA,
+		"X-Apple-Api-Key":           HMEWidgetKey,
 		"X-Apple-I-Request-Context": "ca",
 		"X-Apple-I-Timezone":        "Asia/Shanghai",
 		"X-Apple-I-FD-Client-Info":  `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`,
-	}
-
-	if withAPIKey {
-		headers["X-Apple-Api-Key"] = HMEWidgetKey
 	}
 
 	c.auth.session.mu.RLock()
@@ -53,7 +50,7 @@ func (c *HMEClient) hmeHeaders(withAPIKey bool) map[string]string {
 }
 
 // doRequest performs an HME API request
-func (c *HMEClient) doRequest(method, urlPath string, body interface{}, withAPIKey bool) (*http.Response, error) {
+func (c *HMEClient) doRequest(method, urlPath string, body interface{}) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonData, err := json.Marshal(body)
@@ -68,7 +65,7 @@ func (c *HMEClient) doRequest(method, urlPath string, body interface{}, withAPIK
 		return nil, err
 	}
 
-	for k, v := range c.hmeHeaders(withAPIKey) {
+	for k, v := range c.hmeHeaders() {
 		req.Header.Set(k, v)
 	}
 
@@ -108,7 +105,7 @@ func (c *HMEClient) Bootstrap() error {
 	c.logCookies()
 
 	// Step 1: Bootstrap portal
-	resp, err := c.doRequest("GET", BootstrapURL, nil, true)
+	resp, err := c.doRequest("GET", BootstrapURL, nil)
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
@@ -120,7 +117,7 @@ func (c *HMEClient) Bootstrap() error {
 	}
 
 	// Step 2: Token exchange (non-fatal — HME API may work without it)
-	resp, err = c.doRequest("GET", TokenURL, nil, true)
+	resp, err = c.doRequest("GET", TokenURL, nil)
 	if err != nil {
 		srpLog.Printf("[HME] token exchange error (non-fatal): %v", err)
 	} else {
@@ -253,7 +250,7 @@ func (c *HMEClient) ListEmails() ([]HMEEmail, error) {
 		return nil, err
 	}
 
-	resp, err := c.doRequest("GET", AccountBase+"/email/private", nil, false)
+	resp, err := c.doRequest("GET", AccountBase+"/email/private", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +275,7 @@ func (c *HMEClient) GenerateEmail() (string, error) {
 		return "", err
 	}
 
-	resp, err := c.doRequest("POST", AccountBase+"/email/private/add", map[string]interface{}{}, false)
+	resp, err := c.doRequest("POST", AccountBase+"/email/private/add", map[string]interface{}{})
 	if err != nil {
 		return "", err
 	}
@@ -312,7 +309,7 @@ func (c *HMEClient) CompleteEmail(email, label, note, forwardToEmail string) (*H
 		ForwardToEmail: forwardToEmail,
 	}
 
-	resp, err := c.doRequest("PUT", AccountBase+"/email/private/add/complete", req, true)
+	resp, err := c.doRequest("PUT", AccountBase+"/email/private/add/complete", req)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +355,7 @@ func (c *HMEClient) DeleteEmail(id string) error {
 	}
 
 	req := map[string]string{"id": id}
-	resp, err := c.doRequest("POST", AccountBase+"/email/private/delete", req, false)
+	resp, err := c.doRequest("POST", AccountBase+"/email/private/delete", req)
 	if err != nil {
 		return err
 	}
@@ -378,7 +375,7 @@ func (c *HMEClient) GetForwardEmails() ([]string, error) {
 		return nil, err
 	}
 
-	resp, err := c.doRequest("GET", AccountBase+"/forwardemail", nil, false)
+	resp, err := c.doRequest("GET", AccountBase+"/forwardemail", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +399,7 @@ func (c *HMEClient) GetAccountInfo() (*AccountInfo, error) {
 		return nil, err
 	}
 
-	resp, err := c.doRequest("GET", AccountBase, nil, false)
+	resp, err := c.doRequest("GET", AccountBase, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +445,7 @@ func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int
 
 // ExtendSession extends the session lifetime
 func (c *HMEClient) ExtendSession() error {
-	resp, err := c.doRequest("POST", "https://appleid.apple.com/session/extend", map[string]interface{}{}, true)
+	resp, err := c.doRequest("POST", "https://appleid.apple.com/session/extend", map[string]interface{}{})
 	if err != nil {
 		return err
 	}

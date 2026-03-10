@@ -5,7 +5,7 @@ tmp_dir = "tmp"
 [build]
   args_bin = ["--debug"]
   bin = "tmp\\main.exe"
-  cmd = "go build -o tmp\\main.exe ."
+  cmd = "go build -C backend -o ..\\tmp\\main.exe ."
   delay = 1000
   exclude_dir = ["assets", "tmp", "vendor", "testdata", "static", "node_modules", "frontend"]
   exclude_file = []

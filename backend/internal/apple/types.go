@@ -35,6 +35,12 @@ type Session struct {
 	LastActivity time.Time
 }
 
+// RLock acquires a read lock on the session
+func (s *Session) RLock() { s.mu.RLock() }
+
+// RUnlock releases the read lock on the session
+func (s *Session) RUnlock() { s.mu.RUnlock() }
+
 // NewSession creates a new session
 func NewSession() *Session {
 	jar, _ := cookiejar.New(nil)

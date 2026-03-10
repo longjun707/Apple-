@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -49,6 +50,43 @@ func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, "%", "\\%")
 	s = strings.ReplaceAll(s, "_", "\\_")
 	return s
+}
+
+// saveAppleSession persists Apple auth session (tokens + cookies) to database
+func saveAppleSession(accountID uint, auth *apple.AppleAuth) {
+	if store.DB == nil || auth == nil {
+		return
+	}
+	token, scnt, sessionID, cookies := auth.ExportSessionData()
+	if token == "" {
+		return
+	}
+	store.NewAccountRepo().SaveSession(accountID, token, scnt, sessionID, cookies)
+	log.Printf("[Session] Saved Apple session for account %d (cookies_len=%d)", accountID, len(cookies))
+}
+
+// ensureAppleSession checks if Apple session is active for the account, tries to restore from DB if not
+func ensureAppleSession(session *SessionState, accountID uint) bool {
+	// Already active in memory
+	if session.HME != nil && session.AccountID == accountID && session.Auth != nil && session.Auth.IsAuthenticated() {
+		return true
+	}
+	// Try restore from database
+	if store.DB == nil {
+		return false
+	}
+	account, err := store.NewAccountRepo().FindByID(accountID)
+	if err != nil || account.SessionToken == "" {
+		return false
+	}
+	auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
+	hme := apple.NewHMEClient(auth)
+	session.Auth = auth
+	session.HME = hme
+	session.AccountID = accountID
+	session.AppleID = account.AppleID
+	log.Printf("[Session] Restored Apple session for account %d from DB", accountID)
+	return true
 }
 
 // AdminLogin handles admin login
@@ -290,6 +328,9 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 	session.AccountID = uint(id)
 	session.AppleID = account.AppleID
 
+	// Persist session to database
+	go saveAppleSession(uint(id), auth)
+
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
@@ -331,6 +372,9 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 		"last_error": "",
 	})
 
+	// Persist full Apple session (tokens + cookies) to database
+	go saveAppleSession(session.AccountID, session.Auth)
+
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]bool{"authenticated": true}})
 }
 
@@ -361,29 +405,26 @@ func (s *Server) RequestSMSForAccount(c *gin.Context) {
 // GetAccountHME gets HME list for an account
 func (s *Server) GetAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
-	// If we have an active HME client for this account, fetch from Apple
-	if session.HME != nil && session.AccountID == uint(id) && session.Auth.IsAuthenticated() {
+	// Try active session or restore from DB
+	if ensureAppleSession(session, uint(id)) {
 		emails, err := session.HME.ListEmails()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+			log.Printf("[GetAccountHME] Apple API error (falling back to DB): %v", err)
+		} else {
+			go syncHMEToDB(uint(id), emails)
+			c.JSON(http.StatusOK, APIResponse{Success: true, Data: emails})
 			return
 		}
-		// Sync Apple data to local database so the global HME page can see them
-		go syncHMEToDB(uint(id), emails)
-		c.JSON(http.StatusOK, APIResponse{Success: true, Data: emails})
-		return
 	}
 
-	// Otherwise fetch from database
+	// Fallback: fetch from database
 	records, err := store.NewHMERepo().FindByAccountID(uint(id))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: records})
 }
 
@@ -427,7 +468,7 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
-	if session.HME == nil || session.AccountID != uint(id) || !session.Auth.IsAuthenticated() {
+	if !ensureAppleSession(session, uint(id)) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -471,8 +512,8 @@ func (s *Server) DeleteAccountHME(c *gin.Context) {
 		return
 	}
 
-	// Try to delete from Apple if session is active for this account
-	if session.HME != nil && session.AccountID == uint(accountID) && session.Auth.IsAuthenticated() {
+	// Try to delete from Apple if session is active (or can be restored)
+	if ensureAppleSession(session, uint(accountID)) {
 		if err := session.HME.DeleteEmail(hmeId); err != nil {
 			c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "Apple API 删除失败: " + err.Error()})
 			return
@@ -620,7 +661,7 @@ func (s *Server) GetAccountForwardEmails(c *gin.Context) {
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
-	if session.HME == nil || session.AccountID != uint(id) || !session.Auth.IsAuthenticated() {
+	if !ensureAppleSession(session, uint(id)) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -640,7 +681,7 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
-	if session.HME == nil || session.AccountID != uint(id) || !session.Auth.IsAuthenticated() {
+	if !ensureAppleSession(session, uint(id)) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}

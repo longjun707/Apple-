@@ -56,6 +56,13 @@ type Account struct {
 	UpdatedAt time.Time      `json:"updatedAt"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
+	// Apple session persistence (survives server restart)
+	SessionToken   string     `gorm:"type:text" json:"-"`
+	SessionSCNT    string     `gorm:"size:500" json:"-"`
+	SessionID      string     `gorm:"size:500" json:"-"`
+	SessionCookies string     `gorm:"type:text" json:"-"`
+	SessionSavedAt *time.Time `json:"-"`
+
 	// Relations
 	HMERecords []HMERecord `gorm:"foreignKey:AccountID" json:"hmeRecords,omitempty"`
 	LoginLogs  []LoginLog  `gorm:"foreignKey:AccountID" json:"loginLogs,omitempty"`

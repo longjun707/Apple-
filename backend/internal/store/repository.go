@@ -92,6 +92,39 @@ func (r *AccountRepo) List(page, pageSize int) ([]Account, int64, error) {
 	return accounts, total, err
 }
 
+// SaveSession persists Apple session tokens for an account
+func (r *AccountRepo) SaveSession(accountID uint, sessionToken, scnt, sessionID, cookies string) error {
+	now := time.Now()
+	return DB.Model(&Account{}).Where("id = ?", accountID).Updates(map[string]interface{}{
+		"session_token":    sessionToken,
+		"session_scnt":     scnt,
+		"session_id":       sessionID,
+		"session_cookies":  cookies,
+		"session_saved_at": now,
+	}).Error
+}
+
+// ClearSession removes saved session tokens for an account
+func (r *AccountRepo) ClearSession(accountID uint) error {
+	return DB.Model(&Account{}).Where("id = ?", accountID).Updates(map[string]interface{}{
+		"session_token":    "",
+		"session_scnt":     "",
+		"session_id":       "",
+		"session_cookies":  "",
+		"session_saved_at": nil,
+	}).Error
+}
+
+// FindByID finds an account by ID
+func (r *AccountRepo) FindByID(id uint) (*Account, error) {
+	var account Account
+	err := DB.First(&account, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &account, nil
+}
+
 // HMERepo handles HME record database operations
 type HMERepo struct{}
 

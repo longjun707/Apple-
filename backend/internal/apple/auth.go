@@ -426,14 +426,89 @@ func solveHashcash(bits int, challenge string) string {
 	}
 }
 
-// ExportCookies exports session cookies as string
+// SerializableCookie represents a cookie for JSON serialization
+type SerializableCookie struct {
+	Name   string `json:"n"`
+	Value  string `json:"v"`
+	Domain string `json:"d"`
+	Path   string `json:"p"`
+}
+
+var cookieDomains = []string{
+	"https://apple.com",
+	"https://idmsa.apple.com",
+	"https://appleid.apple.com",
+	"https://www.icloud.com",
+	"https://setup.icloud.com",
+}
+
+// ExportSessionData exports the full session state for persistence
+func (a *AppleAuth) ExportSessionData() (token, scnt, sessionID, cookiesJSON string) {
+	a.session.mu.RLock()
+	defer a.session.mu.RUnlock()
+
+	token = a.session.SessionToken
+	scnt = a.session.SCNT
+	sessionID = a.session.SessionID
+
+	var allCookies []SerializableCookie
+	for _, d := range cookieDomains {
+		u, _ := url.Parse(d)
+		for _, c := range a.session.Client.Jar.Cookies(u) {
+			allCookies = append(allCookies, SerializableCookie{
+				Name:   c.Name,
+				Value:  c.Value,
+				Domain: u.Host,
+				Path:   "/",
+			})
+		}
+	}
+	data, _ := json.Marshal(allCookies)
+	cookiesJSON = string(data)
+	return
+}
+
+// RestoreAppleAuth restores a full AppleAuth from persisted session data
+func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
+	auth := NewAppleAuth()
+	auth.session.mu.Lock()
+	auth.session.SessionToken = token
+	auth.session.SCNT = scnt
+	auth.session.SessionID = sessionID
+	auth.session.Authenticated = true
+	auth.session.LastActivity = time.Now()
+
+	// Restore cookies into the jar
+	if cookiesJSON != "" {
+		var cookies []SerializableCookie
+		if json.Unmarshal([]byte(cookiesJSON), &cookies) == nil {
+			// Group cookies by domain
+			byDomain := make(map[string][]*http.Cookie)
+			for _, c := range cookies {
+				byDomain[c.Domain] = append(byDomain[c.Domain], &http.Cookie{
+					Name:  c.Name,
+					Value: c.Value,
+					Path:  c.Path,
+				})
+			}
+			for domain, cs := range byDomain {
+				u, _ := url.Parse("https://" + domain)
+				auth.session.Client.Jar.SetCookies(u, cs)
+			}
+		}
+	}
+
+	auth.session.mu.Unlock()
+	return auth
+}
+
+// ExportCookies exports session cookies as string (for debugging)
 func (a *AppleAuth) ExportCookies() string {
 	a.session.mu.RLock()
 	defer a.session.mu.RUnlock()
 
-	domains := []string{"https://apple.com", "https://idmsa.apple.com", "https://appleid.apple.com"}
 	var parts []string
-	for _, d := range domains {
+	for _, d := range cookieDomains {
 		u, _ := url.Parse(d)
 		for _, cookie := range a.session.Client.Jar.Cookies(u) {
 			parts = append(parts, fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
