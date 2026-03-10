@@ -4,7 +4,7 @@ import { api, type AppleAccount, type PhoneNumber } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
   Plus, Trash2, LogIn, Mail, RefreshCw,
-  Edit, Loader2,
+  Edit, Loader2, Users, Shield, Smartphone,
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog'
@@ -118,11 +118,13 @@ export default function AccountsPage() {
             <table className="min-w-full">
               <thead>
                 <tr className="border-b border-gray-100">
-                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Apple ID</th>
-                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">备注</th>
+                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Apple ID / 姓名</th>
+                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden lg:table-cell">个人信息</th>
                   <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">状态</th>
+                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">安全</th>
                   <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">HME</th>
-                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden lg:table-cell">最后登录</th>
+                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">家人共享</th>
+                  <th className="px-5 py-3.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden xl:table-cell">备注 / 错误</th>
                   <th className="px-5 py-3.5 text-right text-[11px] font-semibold text-gray-500 uppercase tracking-wider">操作</th>
                 </tr>
               </thead>
@@ -132,16 +134,44 @@ export default function AccountsPage() {
                     <td className="px-5 py-4">
                       <button
                         onClick={() => setSelectedAccount(account)}
-                        className="flex items-center gap-2.5 text-sm font-medium text-gray-900 hover:text-apple-blue transition-colors"
+                        className="flex items-center gap-2.5 text-left hover:bg-gray-50 rounded-lg -m-1 p-1 transition-colors"
                       >
-                        <div className="w-8 h-8 bg-gray-50 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <div className="w-9 h-9 bg-gradient-to-br from-gray-100 to-gray-50 rounded-xl flex items-center justify-center flex-shrink-0 border border-gray-100">
                           <Mail className="w-4 h-4 text-gray-400" />
                         </div>
-                        <span className="truncate max-w-[200px]">{account.appleId}</span>
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-gray-900 truncate max-w-[180px]">{account.appleId}</div>
+                          {account.fullName && <div className="text-[12px] text-gray-400 truncate">{account.fullName}</div>}
+                        </div>
                       </button>
                     </td>
-                    <td className="px-5 py-4 text-sm text-gray-500 hidden md:table-cell">
-                      {account.remark || <span className="text-gray-300">—</span>}
+                    <td className="px-5 py-4 hidden lg:table-cell">
+                      <div className="text-[12px] space-y-0.5">
+                        {account.birthday && <div className="text-gray-500">🎂 {account.birthday}</div>}
+                        {account.country && <div className="text-gray-400">🌏 {account.country === 'CHN' ? '中国大陆' : account.country}</div>}
+                        {/* Alternate emails - show count and list */}
+                        {(() => {
+                          try {
+                            const emails: string[] = typeof account.alternateEmails === 'string' 
+                              ? (account.alternateEmails ? JSON.parse(account.alternateEmails) : []) 
+                              : (account.alternateEmails || []);
+                            if (emails.length === 0) return null;
+                            // Total emails = 1 (main Apple ID) + alternate emails
+                            const totalEmails = 1 + emails.length;
+                            return (
+                              <div 
+                                className="text-blue-500 cursor-help" 
+                                title={`主要: ${account.appleId}\n备用: ${emails.join('\n')}`}
+                              >
+                                📧 {totalEmails} 个邮箱
+                              </div>
+                            );
+                          } catch {
+                            return null;
+                          }
+                        })()}
+                        {!account.birthday && !account.country && !account.alternateEmails && <span className="text-gray-300">—</span>}
+                      </div>
                     </td>
                     <td className="px-5 py-4">
                       {account.status === 1 ? (
@@ -157,11 +187,64 @@ export default function AccountsPage() {
                         </span>
                       )}
                     </td>
+                    <td className="px-5 py-4 hidden sm:table-cell">
+                      <div className="flex flex-col gap-1">
+                        {/* Session Status - Most important */}
+                        {account.sessionSavedAt ? (
+                          <span className="text-[10px] text-emerald-600 font-medium" title={`会话保存于 ${new Date(account.sessionSavedAt).toLocaleString()}`}>
+                            ✓ 已登录
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-orange-500 font-medium">
+                            ⚠ 需要登录
+                          </span>
+                        )}
+                        {/* 2FA Status */}
+                        <div className="flex items-center gap-1">
+                          <Shield className={`w-3.5 h-3.5 ${account.twoFactorEnabled ? 'text-emerald-500' : 'text-gray-300'}`} />
+                          <span className={`text-[11px] ${account.twoFactorEnabled ? 'text-emerald-600' : 'text-gray-400'}`}>
+                            {account.twoFactorEnabled ? '2FA' : '无 2FA'}
+                          </span>
+                        </div>
+                        {/* Devices */}
+                        {account.trustedDeviceCount !== undefined && account.trustedDeviceCount > 0 && (
+                          <div className="flex items-center gap-1">
+                            <Smartphone className="w-3.5 h-3.5 text-blue-400" />
+                            <span className="text-[11px] text-gray-500">{account.trustedDeviceCount} 设备</span>
+                          </div>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-5 py-4 text-sm text-gray-600 tabular-nums font-medium hidden sm:table-cell">
                       {account.hmeCount}
                     </td>
-                    <td className="px-5 py-4 text-[13px] text-gray-400 hidden lg:table-cell">
-                      {account.lastLogin ? new Date(account.lastLogin).toLocaleString() : '—'}
+                    <td className="px-5 py-4 hidden md:table-cell">
+                      {account.familyMemberCount && account.familyMemberCount > 0 ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${
+                            account.isFamilyOrganizer
+                              ? 'bg-purple-50 text-purple-700'
+                              : account.familyRole === 'parent'
+                              ? 'bg-orange-50 text-orange-700'
+                              : 'bg-gray-50 text-gray-600'
+                          }`}>
+                            <Users className="w-3 h-3" />
+                            {account.familyMemberCount}
+                          </span>
+                          <span className="text-[11px] text-gray-400">
+                            {account.isFamilyOrganizer ? '组织者' : account.familyRole === 'parent' ? '家长' : account.familyRole === 'child' ? '儿童' : '成员'}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-gray-300">—</span>
+                      )}
+                    </td>
+                    <td className="px-5 py-4 hidden xl:table-cell max-w-[200px]">
+                      <div className="text-[12px] space-y-0.5">
+                        {account.remark && <div className="text-gray-500 truncate" title={account.remark}>{account.remark}</div>}
+                        {account.lastError && <div className="text-red-500 truncate" title={account.lastError}>⚠ {account.lastError}</div>}
+                        {!account.remark && !account.lastError && <span className="text-gray-300">—</span>}
+                      </div>
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex justify-end gap-1">
@@ -223,14 +306,11 @@ export default function AccountsPage() {
         accountId={twoFAAccountId}
         phoneNumbers={twoFAPhones}
         onClose={() => setTwoFAAccountId(null)}
-        onSuccess={() => {
-          const account = accounts.find((a) => a.id === twoFAAccountId)
+        onSuccess={async () => {
           setTwoFAAccountId(null)
-          queryClient.invalidateQueries({ queryKey: ['accounts'] })
-          if (account) {
-            toast.success('Apple 账户登录成功')
-            setSelectedAccount(account)
-          }
+          toast.success('Apple 账户登录成功')
+          // Refresh accounts list to get updated data
+          await queryClient.invalidateQueries({ queryKey: ['accounts'] })
         }}
       />
 

@@ -54,6 +54,9 @@ func InitDB(cfg *Config) error {
 		cfg = DefaultConfig()
 	}
 
+	// Initialize encryption for Apple passwords
+	InitEncryption()
+
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		cfg.User,
 		cfg.Password,
@@ -62,9 +65,15 @@ func InitDB(cfg *Config) error {
 		cfg.DBName,
 	)
 
+	// Use Warn level by default; set DB_DEBUG=1 for verbose SQL logging
+	logLevel := logger.Warn
+	if os.Getenv("DB_DEBUG") == "1" {
+		logLevel = logger.Info
+	}
+
 	var err error
 	DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: logger.Default.LogMode(logLevel),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
@@ -87,7 +96,33 @@ func InitDB(cfg *Config) error {
 		return fmt.Errorf("failed to migrate: %w", err)
 	}
 
+	// Start periodic cleanup of old login logs (keep 90 days)
+	go cleanupOldLogs()
+
 	return nil
+}
+
+// cleanupOldLogs periodically removes login logs older than 90 days
+func cleanupOldLogs() {
+	// Run once on startup
+	time.Sleep(10 * time.Second)
+	deleteOldLogs()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	for range ticker.C {
+		deleteOldLogs()
+	}
+}
+
+func deleteOldLogs() {
+	if DB == nil {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -90)
+	result := DB.Where("created_at < ?", cutoff).Delete(&LoginLog{})
+	if result.RowsAffected > 0 {
+		log.Printf("🧹 Cleaned up %d old login logs", result.RowsAffected)
+	}
 }
 
 // AutoMigrate runs database migrations

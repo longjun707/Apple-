@@ -2,6 +2,8 @@ package store
 
 import (
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // AdminRepo handles admin user database operations
@@ -123,6 +125,25 @@ func (r *AccountRepo) FindByID(id uint) (*Account, error) {
 		return nil, err
 	}
 	return &account, nil
+}
+
+// DeleteCascade deletes an account and all related HME records and login logs
+func (r *AccountRepo) DeleteCascade(accountID uint) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		// Delete related HME records
+		if err := tx.Where("account_id = ?", accountID).Delete(&HMERecord{}).Error; err != nil {
+			return err
+		}
+		// Delete related login logs
+		if err := tx.Where("account_id = ?", accountID).Delete(&LoginLog{}).Error; err != nil {
+			return err
+		}
+		// Delete the account itself
+		if err := tx.Delete(&Account{}, accountID).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // HMERepo handles HME record database operations

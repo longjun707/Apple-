@@ -6,8 +6,10 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"apple-hme-manager/internal/api"
+	"apple-hme-manager/internal/apple"
 	"apple-hme-manager/internal/store"
 
 	"github.com/gin-contrib/cors"
@@ -28,6 +30,8 @@ func main() {
 
 	if !*debug {
 		gin.SetMode(gin.ReleaseMode)
+	} else {
+		apple.SetDebugMode(true)
 	}
 
 	// Initialize database
@@ -37,6 +41,8 @@ func main() {
 			log.Println("   Running without database persistence...")
 		} else {
 			defer store.Close()
+			// Start periodic session refresh (initial + every 4 minutes)
+			go api.StartPeriodicSessionRefresh()
 		}
 	}
 
@@ -45,7 +51,7 @@ func main() {
 	// CORS configuration
 	allowedOrigins := []string{"http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"}
 	if extra := os.Getenv("CORS_ORIGINS"); extra != "" {
-		allowedOrigins = strings.Split(extra, ",")
+		allowedOrigins = append(allowedOrigins, strings.Split(extra, ",")...)
 	}
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     allowedOrigins,
@@ -61,12 +67,15 @@ func main() {
 	// Apply session middleware to all routes
 	r.Use(server.SessionMiddleware())
 
+	// Rate limiting: 10 requests per minute for login endpoints
+	loginLimiter := api.NewRateLimiter(10, time.Minute)
+
 	// Routes
 	apiGroup := r.Group("/api")
 	{
 		// Public routes (no auth required)
 		apiGroup.GET("/health", server.Health)
-		apiGroup.POST("/admin/login", server.AdminLogin)
+		apiGroup.POST("/admin/login", loginLimiter.Middleware(), server.AdminLogin)
 
 		// Protected routes (require admin auth)
 		protected := apiGroup.Group("")
@@ -89,7 +98,7 @@ func main() {
 				accounts.POST("", server.CreateAccount)
 				accounts.PUT("/:id", server.UpdateAccount)
 				accounts.DELETE("/:id", server.DeleteAccount)
-				accounts.POST("/:id/login", server.LoginAppleAccount)
+				accounts.POST("/:id/login", loginLimiter.Middleware(), server.LoginAppleAccount)
 				accounts.POST("/:id/2fa", server.Verify2FAForAccount)
 				accounts.POST("/:id/request-sms", server.RequestSMSForAccount)
 				accounts.GET("/:id/hme", server.GetAccountHME)
@@ -97,30 +106,15 @@ func main() {
 				accounts.POST("/:id/hme/batch", server.BatchCreateAccountHME)
 				accounts.DELETE("/:id/hme/:hmeId", server.DeleteAccountHME)
 				accounts.GET("/:id/forward-emails", server.GetAccountForwardEmails)
+				// Account info refresh
+				accounts.POST("/:id/refresh", server.RefreshAccountInfo)
+				// Alternate email management
+				accounts.POST("/:id/alternate-email/send-verification", server.SendAlternateEmailVerification)
+				accounts.POST("/:id/alternate-email/verify", server.VerifyAlternateEmail)
+				accounts.DELETE("/:id/alternate-email", server.RemoveAlternateEmail)
 			}
 		}
 
-		// Legacy auth routes (for backward compatibility)
-		auth := apiGroup.Group("/auth")
-		{
-			auth.POST("/login", server.Login)
-			auth.POST("/2fa", server.Verify2FA)
-			auth.POST("/sms", server.RequestSMS)
-			auth.POST("/logout", server.Logout)
-		}
-
-		// Legacy account routes
-		apiGroup.GET("/account", server.GetAccount)
-
-		// Legacy HME routes
-		hme := apiGroup.Group("/hme")
-		{
-			hme.GET("", server.ListHME)
-			hme.POST("", server.CreateHME)
-			hme.POST("/batch", server.BatchCreateHME)
-			hme.DELETE("/:id", server.DeleteHME)
-			hme.GET("/forward-emails", server.GetForwardEmails)
-		}
 	}
 
 	// Serve static files (frontend) in production

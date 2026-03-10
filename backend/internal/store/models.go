@@ -61,7 +61,20 @@ type Account struct {
 	SessionSCNT    string     `gorm:"size:500" json:"-"`
 	SessionID      string     `gorm:"size:500" json:"-"`
 	SessionCookies string     `gorm:"type:text" json:"-"`
-	SessionSavedAt *time.Time `json:"-"`
+	SessionSavedAt *time.Time `json:"sessionSavedAt"`
+
+	// Family sharing info
+	IsFamilyOrganizer bool   `gorm:"default:false" json:"isFamilyOrganizer"`
+	FamilyMemberCount int    `gorm:"default:0" json:"familyMemberCount"`
+	FamilyRole        string `gorm:"size:50" json:"familyRole"` // organizer, parent, adult, child
+
+	// Profile info
+	FullName           string `gorm:"size:255" json:"fullName"`
+	Birthday           string `gorm:"size:50" json:"birthday"`
+	Country            string `gorm:"size:10" json:"country"`          // CHN, USA, etc.
+	AlternateEmails    string `gorm:"type:text" json:"alternateEmails"` // JSON array
+	TrustedDeviceCount int    `gorm:"default:0" json:"trustedDeviceCount"`
+	TwoFactorEnabled   bool   `gorm:"default:false" json:"twoFactorEnabled"`
 
 	// Relations
 	HMERecords []HMERecord `gorm:"foreignKey:AccountID" json:"hmeRecords,omitempty"`

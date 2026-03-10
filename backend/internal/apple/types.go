@@ -157,6 +157,73 @@ type ServiceError struct {
 	Message string `json:"message"`
 }
 
+// FamilyMember represents a family sharing member
+type FamilyMember struct {
+	Dsid              string `json:"dsid"`
+	FirstName         string `json:"firstName"`
+	LastName          string `json:"lastName"`
+	FullName          string `json:"fullName"`
+	AgeClassification string `json:"ageClassification"` // ADULT, CHILD, etc.
+	AppleID           string `json:"appleId"`
+	AgeInYears        int    `json:"ageInYears"`
+	IsParent          bool   `json:"isParent"`
+}
+
+// FamilyInfo represents family sharing info
+type FamilyInfo struct {
+	FamilyID      string `json:"familyId"`
+	OrganizerDsid string `json:"organizerDsid"`
+}
+
+// FamilyResponse represents the family members API response
+type FamilyResponse struct {
+	CurrentDsid        string         `json:"currentDsid"`
+	CurrentUserAppleID string         `json:"currentUserAppleId"`
+	Family             *FamilyInfo    `json:"family"`
+	FamilyMembers      []FamilyMember `json:"familyMembers"`
+	IsLinkedToFamily   bool           `json:"isLinkedToFamily"`
+	IsMemberOfFamily   bool           `json:"isMemberOfFamily"`
+}
+
+// AccountManageResponse represents /account/manage API response
+type AccountManageResponse struct {
+	LocalizedBirthday string `json:"localizedBirthday"`
+	NameOrder         string `json:"nameOrder"` // lastName/firstName or firstName/lastName
+	PageFeatures      struct {
+		DefaultCountry string `json:"defaultCountry"`
+	} `json:"pageFeatures"`
+	AlternateEmailAddresses []struct {
+		Address string `json:"address"`
+		Type    string `json:"type"` // profile, rescue, etc.
+		Vetted  bool   `json:"vetted"`
+	} `json:"alternateEmailAddresses"`
+	Account struct {
+		Name      string `json:"name"`
+		FirstName string `json:"firstName"`
+		LastName  string `json:"lastName"`
+	} `json:"account,omitempty"`
+}
+
+// DevicesResponse represents /account/manage/security/devices API response
+type DevicesResponse struct {
+	Devices []struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		ModelName string `json:"modelName"`
+	} `json:"devices"`
+}
+
+// AccountProfileInfo aggregates all profile information
+type AccountProfileInfo struct {
+	FullName             string   `json:"fullName"`
+	Birthday             string   `json:"birthday"`
+	Country              string   `json:"country"`
+	AlternateEmails      []string `json:"alternateEmails"`
+	TrustedDeviceCount   int      `json:"trustedDeviceCount"`
+	TrustedPhoneCount    int      `json:"trustedPhoneCount"`
+	TwoFactorEnabled     bool     `json:"twoFactorEnabled"`
+}
+
 // AuthState represents the current auth state
 type AuthState int
 
@@ -177,4 +244,30 @@ type LoginResult struct {
 		ID          int    `json:"id"`
 		NumberWithDialCode string `json:"numberWithDialCode"`
 	} `json:"phoneNumbers,omitempty"`
+}
+
+// AlternateEmailAddResponse represents the response from sending verification code
+type AlternateEmailAddResponse struct {
+	VerificationID string `json:"verificationId"`
+	CanGenerateNew bool   `json:"canGenerateNew"`
+	NewICloudEmail bool   `json:"newICloudEmail"`
+	Length         int    `json:"length"`
+	Address        string `json:"address"`
+}
+
+// AlternateEmailVerifyRequest represents the request to verify email code
+type AlternateEmailVerifyRequest struct {
+	Address          string `json:"address"`
+	VerificationInfo struct {
+		ID     string `json:"id"`
+		Answer string `json:"answer"`
+	} `json:"verificationInfo"`
+}
+
+// AlternateEmailVerifyResponse represents the response after verification
+type AlternateEmailVerifyResponse struct {
+	ID      int    `json:"id"`
+	Type    string `json:"type"`
+	Address string `json:"address"`
+	Vetted  bool   `json:"vetted"`
 }

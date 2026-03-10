@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
@@ -45,8 +46,9 @@ func clampPageSize(pageSize int) int {
 	return pageSize
 }
 
-// escapeLike escapes SQL LIKE wildcards.
+// escapeLike escapes SQL LIKE wildcards and the escape character itself.
 func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "%", "\\%")
 	s = strings.ReplaceAll(s, "_", "\\_")
 	return s
@@ -65,8 +67,80 @@ func saveAppleSession(accountID uint, auth *apple.AppleAuth) {
 	log.Printf("[Session] Saved Apple session for account %d (cookies_len=%d)", accountID, len(cookies))
 }
 
+// fetchAndSaveAccountInfo fetches family sharing and profile info and saves to database
+func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
+	if store.DB == nil || hme == nil {
+		return
+	}
+
+	updates := map[string]interface{}{}
+
+	// 1. Get profile info (birthday, country, devices)
+	profileResp, err := hme.GetAccountProfile()
+	if err != nil {
+		log.Printf("[Profile] Failed to get profile for account %d: %v", accountID, err)
+	} else {
+		if profileResp.Birthday != "" {
+			updates["birthday"] = profileResp.Birthday
+		}
+		if profileResp.Country != "" {
+			updates["country"] = profileResp.Country
+		}
+		if len(profileResp.AlternateEmails) > 0 {
+			emailsJSON, _ := json.Marshal(profileResp.AlternateEmails)
+			updates["alternate_emails"] = string(emailsJSON)
+		}
+		updates["trusted_device_count"] = profileResp.TrustedDeviceCount
+	}
+
+	// 2. Get family info and fullName (optional, may fail for restored sessions)
+	familyResp, err := hme.GetFamilyMembers()
+	if err != nil {
+		// Family API often fails for restored sessions due to iframe cookie requirements
+		// This is non-critical, so we just skip it silently
+	} else {
+		updates["family_member_count"] = len(familyResp.FamilyMembers)
+
+		// Find current user and get fullName + role
+		for _, m := range familyResp.FamilyMembers {
+			if m.Dsid == familyResp.CurrentDsid {
+				// Get fullName from family member
+				if m.FullName != "" {
+					updates["full_name"] = m.FullName
+				}
+				// Determine role
+				if familyResp.Family != nil && familyResp.Family.OrganizerDsid == m.Dsid {
+					updates["is_family_organizer"] = true
+					updates["family_role"] = "organizer"
+				} else if m.IsParent {
+					updates["is_family_organizer"] = false
+					updates["family_role"] = "parent"
+				} else if m.AgeClassification == "CHILD" {
+					updates["is_family_organizer"] = false
+					updates["family_role"] = "child"
+				} else {
+					updates["is_family_organizer"] = false
+					updates["family_role"] = "adult"
+				}
+				break
+			}
+		}
+	}
+
+	if len(updates) > 0 {
+		store.DB.Model(&store.Account{}).Where("id = ?", accountID).Updates(updates)
+		log.Printf("[Account] Saved account info for %d: %+v", accountID, updates)
+	}
+}
+
+// maxSessionAge is the maximum age for a restored Apple session (7 days)
+const maxSessionAge = 7 * 24 * time.Hour
+
 // ensureAppleSession checks if Apple session is active for the account, tries to restore from DB if not
 func ensureAppleSession(session *SessionState, accountID uint) bool {
+	if accountID == 0 {
+		return false
+	}
 	// Already active in memory
 	if session.HME != nil && session.AccountID == accountID && session.Auth != nil && session.Auth.IsAuthenticated() {
 		return true
@@ -79,13 +153,23 @@ func ensureAppleSession(session *SessionState, accountID uint) bool {
 	if err != nil || account.SessionToken == "" {
 		return false
 	}
+	// Reject stale sessions
+	if account.SessionSavedAt == nil || time.Since(*account.SessionSavedAt) > maxSessionAge {
+		log.Printf("[Session] Session for account %d is too old, skipping restore", accountID)
+		return false
+	}
+	log.Printf("[Session] Restoring session for account %d...", accountID)
 	auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
 	hme := apple.NewHMEClient(auth)
+
+	// Mark session as restored - skip Bootstrap validation, let HME API validate directly
+	hme.MarkRestoredSession()
+
 	session.Auth = auth
 	session.HME = hme
 	session.AccountID = accountID
 	session.AppleID = account.AppleID
-	log.Printf("[Session] Restored Apple session for account %d from DB", accountID)
+	log.Printf("[Session] Restored Apple session for account %d from DB (skipping validation)", accountID)
 	return true
 }
 
@@ -146,13 +230,18 @@ func (s *Server) AdminLogout(c *gin.Context) {
 // AdminInfo returns current admin info
 func (s *Server) AdminInfo(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	c.JSON(http.StatusOK, APIResponse{
-		Success: true,
-		Data: map[string]interface{}{
-			"id":       session.AdminID,
-			"username": session.AdminName,
-		},
-	})
+	data := map[string]interface{}{
+		"id":       session.AdminID,
+		"username": session.AdminName,
+	}
+	// Fetch full admin details from DB so frontend gets nickname/role
+	if store.DB != nil {
+		if admin, err := store.NewAdminRepo().FindByID(session.AdminID); err == nil {
+			data["nickname"] = admin.Nickname
+			data["role"] = admin.Role
+		}
+	}
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: data})
 }
 
 // ListAccounts returns all Apple accounts
@@ -198,7 +287,7 @@ func (s *Server) CreateAccount(c *gin.Context) {
 
 	account := &store.Account{
 		AppleID:  req.AppleID,
-		Password: req.Password,
+		Password: store.EncryptPassword(req.Password),
 		Remark:   req.Remark,
 		Status:   1,
 	}
@@ -230,7 +319,7 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 		"remark":   req.Remark,
 	}
 	if req.Password != "" {
-		updates["password"] = req.Password
+		updates["password"] = store.EncryptPassword(req.Password)
 	}
 
 	if err := store.DB.Model(&store.Account{}).Where("id = ?", id).Updates(updates).Error; err != nil {
@@ -241,7 +330,7 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }
 
-// DeleteAccount deletes an Apple account
+// DeleteAccount deletes an Apple account and all related data
 func (s *Server) DeleteAccount(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	if id == 0 {
@@ -249,7 +338,7 @@ func (s *Server) DeleteAccount(c *gin.Context) {
 		return
 	}
 
-	if err := store.DB.Delete(&store.Account{}, id).Error; err != nil {
+	if err := store.NewAccountRepo().DeleteCascade(uint(id)); err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
@@ -274,9 +363,16 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 		return
 	}
 
+	// Decrypt password for Apple login
+	plainPassword, decErr := store.DecryptPassword(account.Password)
+	if decErr != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "密码解密失败: " + decErr.Error()})
+		return
+	}
+
 	// Create Apple auth client
 	auth := apple.NewAppleAuth()
-	result, err := auth.Login(account.AppleID, account.Password)
+	result, err := auth.Login(account.AppleID, plainPassword)
 
 	// Update account status
 	now := time.Now()
@@ -328,8 +424,13 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 	session.AccountID = uint(id)
 	session.AppleID = account.AppleID
 
-	// Persist session to database
-	go saveAppleSession(uint(id), auth)
+	// Persist session to database — export session data before goroutine to avoid race
+	token, scnt, sessID, cookies := auth.ExportSessionData()
+	go func() {
+		if store.DB != nil && token != "" {
+			store.NewAccountRepo().SaveSession(uint(id), token, scnt, sessID, cookies)
+		}
+	}()
 
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
@@ -366,6 +467,10 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 		return
 	}
 
+	// Log cookies immediately after 2FA (before Bootstrap)
+	log.Printf("[2FA] Cookies BEFORE Bootstrap:")
+	session.Auth.LogAllCookies()
+
 	// Create HME client and run Bootstrap to get all necessary cookies (aidsp, idclient, etc.)
 	if session.HME == nil {
 		session.HME = apple.NewHMEClient(session.Auth)
@@ -373,6 +478,10 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 	if err := session.HME.Bootstrap(); err != nil {
 		log.Printf("[2FA] Bootstrap warning (session still valid): %v", err)
 	}
+
+	// Log cookies after Bootstrap
+	log.Printf("[2FA] Cookies AFTER Bootstrap:")
+	session.Auth.LogAllCookies()
 
 	// Update account status
 	store.DB.Model(&store.Account{}).Where("id = ?", session.AccountID).Updates(map[string]interface{}{
@@ -382,7 +491,10 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 	})
 
 	// Persist full Apple session (tokens + cookies) to database AFTER Bootstrap
-	go saveAppleSession(session.AccountID, session.Auth)
+	saveAppleSession(session.AccountID, session.Auth)
+
+	// Fetch and save account info (profile + family) - run synchronously so data is ready for frontend
+	fetchAndSaveAccountInfo(session.AccountID, session.HME)
 
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]bool{"authenticated": true}})
 }
@@ -411,16 +523,128 @@ func (s *Server) RequestSMSForAccount(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]string{"message": "短信已发送"}})
 }
 
+// clearInvalidSession clears an invalid session from database
+func clearInvalidSession(accountID uint) {
+	if store.DB == nil {
+		return
+	}
+	store.DB.Model(&store.Account{}).Where("id = ?", accountID).Updates(map[string]interface{}{
+		"session_token":    "",
+		"session_scnt":     "",
+		"session_id":       "",
+		"session_cookies":  "",
+		"session_saved_at": nil,
+	})
+	log.Printf("[Session] Cleared invalid session for account %d", accountID)
+}
+
+// RefreshAllSessions extends all saved sessions
+// This is called when the server starts and periodically thereafter
+func RefreshAllSessions() {
+	if store.DB == nil {
+		log.Printf("[Session] Database not connected, skipping session refresh")
+		return
+	}
+
+	log.Printf("[Session] Starting to refresh all saved sessions...")
+
+	// Find all accounts with saved sessions
+	var accounts []store.Account
+	if err := store.DB.Where("session_token != '' AND session_token IS NOT NULL").Find(&accounts).Error; err != nil {
+		log.Printf("[Session] Failed to query accounts: %v", err)
+		return
+	}
+
+	if len(accounts) == 0 {
+		log.Printf("[Session] No saved sessions found")
+		return
+	}
+
+	log.Printf("[Session] Found %d accounts with saved sessions", len(accounts))
+
+	valid := 0
+	invalid := 0
+
+	for _, account := range accounts {
+		log.Printf("[Session] Refreshing session for account %d (%s)...", account.ID, account.AppleID)
+
+		// Restore session
+		auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
+		hme := apple.NewHMEClient(auth)
+
+		// Try to extend session
+		ok, err := hme.ExtendSession()
+		if ok {
+			log.Printf("[Session] ✓ Account %d session extended successfully", account.ID)
+			// Update saved session (new cookies may have been set)
+			saveAppleSession(account.ID, auth)
+			valid++
+		} else {
+			log.Printf("[Session] ✗ Account %d session invalid: %v", account.ID, err)
+			// Don't clear - let user re-login manually
+			invalid++
+		}
+	}
+
+	log.Printf("[Session] Session refresh complete: %d valid, %d invalid (of %d total)", valid, invalid, len(accounts))
+}
+
+// StartPeriodicSessionRefresh starts a goroutine that refreshes sessions every 3-5 minutes (random)
+func StartPeriodicSessionRefresh() {
+	// Initial refresh on startup
+	RefreshAllSessions()
+
+	// Then refresh with random interval between 3-5 minutes
+	go func() {
+		for {
+			// Random delay: 3-5 minutes (180-300 seconds)
+			delaySec := 180 + time.Duration(time.Now().UnixNano()%120)
+			log.Printf("[Session] Next refresh in %d seconds", delaySec)
+			time.Sleep(delaySec * time.Second)
+
+			log.Printf("[Session] Periodic session refresh triggered")
+			RefreshAllSessions()
+		}
+	}()
+	log.Printf("[Session] Periodic session refresh started (random 3-5 minutes)")
+}
+
+// hmeRecordToEmail converts a DB HMERecord to the Apple HMEEmail format expected by frontend
+func hmeRecordToEmail(r store.HMERecord) apple.HMEEmail {
+	return apple.HMEEmail{
+		ID:             r.HMEID,
+		EmailAddress:   r.EmailAddress,
+		Label:          r.Label,
+		Note:           r.Note,
+		ForwardToEmail: r.ForwardToEmail,
+		Active:         r.Active,
+		CreateTime:     r.CreatedAt.UnixMilli(),
+	}
+}
+
 // GetAccountHME gets HME list for an account
 func (s *Server) GetAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
 
 	// Try active session or restore from DB
 	if ensureAppleSession(session, uint(id)) {
 		emails, err := session.HME.ListEmails()
 		if err != nil {
-			log.Printf("[GetAccountHME] Apple API error (falling back to DB): %v", err)
+			errStr := err.Error()
+			log.Printf("[GetAccountHME] Apple API error: %v", err)
+
+			// If 401 error, session is invalid - clear it
+			if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
+				go clearInvalidSession(uint(id))
+				session.HME = nil
+				session.Auth = nil
+				log.Printf("[GetAccountHME] Session expired for account %d, cleared", id)
+			}
 		} else {
 			go syncHMEToDB(uint(id), emails)
 			// Save session after successful HME operation (Bootstrap may have added new cookies)
@@ -430,13 +654,17 @@ func (s *Server) GetAccountHME(c *gin.Context) {
 		}
 	}
 
-	// Fallback: fetch from database
+	// Fallback: fetch from database — convert to HMEEmail format for frontend consistency
 	records, err := store.NewHMERepo().FindByAccountID(uint(id))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, APIResponse{Success: true, Data: records})
+	emails := make([]apple.HMEEmail, len(records))
+	for i, r := range records {
+		emails[i] = hmeRecordToEmail(r)
+	}
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: emails})
 }
 
 // syncHMEToDB syncs Apple HME emails to the local database (upsert)
@@ -448,16 +676,17 @@ func syncHMEToDB(accountID uint, emails []apple.HMEEmail) {
 	for _, e := range emails {
 		existing, _ := hmeRepo.FindByHMEID(e.ID)
 		if existing != nil {
-			// Update if changed
-			store.DB.Model(existing).Updates(map[string]interface{}{
+			if err := store.DB.Model(existing).Updates(map[string]interface{}{
 				"email_address":    e.EmailAddress,
 				"label":            e.Label,
 				"note":             e.Note,
 				"forward_to_email": e.ForwardToEmail,
 				"active":           e.Active,
-			})
+			}).Error; err != nil {
+				log.Printf("[syncHME] Failed to update HME %s: %v", e.ID, err)
+			}
 		} else {
-			hmeRepo.Create(&store.HMERecord{
+			if err := hmeRepo.Create(&store.HMERecord{
 				AccountID:      accountID,
 				HMEID:          e.ID,
 				EmailAddress:   e.EmailAddress,
@@ -465,7 +694,9 @@ func syncHMEToDB(accountID uint, emails []apple.HMEEmail) {
 				Note:           e.Note,
 				ForwardToEmail: e.ForwardToEmail,
 				Active:         e.Active,
-			})
+			}); err != nil {
+				log.Printf("[syncHME] Failed to create HME %s: %v", e.ID, err)
+			}
 		}
 	}
 	// Update count
@@ -478,6 +709,10 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
 
 	if !ensureAppleSession(session, uint(id)) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
@@ -523,12 +758,15 @@ func (s *Server) DeleteAccountHME(c *gin.Context) {
 		return
 	}
 
+	localOnly := false
 	// Try to delete from Apple if session is active (or can be restored)
 	if ensureAppleSession(session, uint(accountID)) {
 		if err := session.HME.DeleteEmail(hmeId); err != nil {
 			c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "Apple API 删除失败: " + err.Error()})
 			return
 		}
+	} else {
+		localOnly = true
 	}
 
 	// Delete from database
@@ -539,7 +777,13 @@ func (s *Server) DeleteAccountHME(c *gin.Context) {
 	count, _ := hmeRepo.Count(uint(accountID))
 	store.NewAccountRepo().UpdateHMECount(uint(accountID), int(count))
 
-	c.JSON(http.StatusOK, APIResponse{Success: true})
+	if localOnly {
+		c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]string{
+			"warning": "仅从本地数据库删除，Apple 端可能仍存在（请先登录账户）",
+		}})
+	} else {
+		c.JSON(http.StatusOK, APIResponse{Success: true})
+	}
 }
 
 // AdminStats returns aggregate dashboard stats
@@ -592,7 +836,10 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 		Where("hme_records.deleted_at IS NULL")
 	if search != "" {
 		like := "%" + escapeLike(search) + "%"
-		countQuery = countQuery.Where("hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ? ESCAPE '\\'", like, like, like)
+		countQuery = countQuery.Where(
+			"hme_records.email_address LIKE ? ESCAPE '\\' OR hme_records.label LIKE ? ESCAPE '\\' OR accounts.apple_id LIKE ? ESCAPE '\\'",
+			like, like, like,
+		)
 	}
 	countQuery.Count(&total)
 
@@ -603,7 +850,10 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 		Where("hme_records.deleted_at IS NULL")
 	if search != "" {
 		like := "%" + escapeLike(search) + "%"
-		dataQuery = dataQuery.Where("hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ? ESCAPE '\\'", like, like, like)
+		dataQuery = dataQuery.Where(
+			"hme_records.email_address LIKE ? ESCAPE '\\' OR hme_records.label LIKE ? ESCAPE '\\' OR accounts.apple_id LIKE ? ESCAPE '\\'",
+			like, like, like,
+		)
 	}
 
 	offset := (page - 1) * pageSize
@@ -665,12 +915,12 @@ func (s *Server) AdminChangePassword(c *gin.Context) {
 // GetAccountForwardEmails returns available forward-to emails for an account
 func (s *Server) GetAccountForwardEmails(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
 
 	if !ensureAppleSession(session, uint(id)) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
@@ -691,6 +941,10 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
 
 	if !ensureAppleSession(session, uint(id)) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
@@ -749,4 +1003,156 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 			"failed":  len(errors),
 		},
 	})
+}
+
+// SendAlternateEmailVerification sends a verification code to add an alternate email
+func (s *Server) SendAlternateEmailVerification(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+
+	if !ensureAppleSession(session, uint(id)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请输入有效的邮箱地址"})
+		return
+	}
+
+	result, err := session.HME.SendAlternateEmailVerification(req.Email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"verificationId": result.VerificationID,
+			"address":        result.Address,
+			"length":         result.Length,
+		},
+	})
+}
+
+// VerifyAlternateEmail verifies the code and adds the alternate email
+func (s *Server) VerifyAlternateEmail(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+
+	if !ensureAppleSession(session, uint(id)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	var req struct {
+		Email          string `json:"email" binding:"required"`
+		VerificationID string `json:"verificationId" binding:"required"`
+		Code           string `json:"code" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "参数不完整"})
+		return
+	}
+
+	result, err := session.HME.VerifyAlternateEmail(req.Email, req.VerificationID, req.Code)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	// Update account's alternate emails in database
+	go func() {
+		if session.HME != nil {
+			fetchAndSaveAccountInfo(uint(id), session.HME)
+		}
+	}()
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"address": result.Address,
+			"vetted":  result.Vetted,
+		},
+	})
+}
+
+// RefreshAccountInfo refreshes account profile info from Apple
+func (s *Server) RefreshAccountInfo(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+
+	if !ensureAppleSession(session, uint(id)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	// Fetch and save account info synchronously
+	fetchAndSaveAccountInfo(uint(id), session.HME)
+
+	// Return updated account
+	account, err := store.NewAccountRepo().FindByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "获取账户失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: account})
+}
+
+// RemoveAlternateEmail removes an alternate email from the account
+func (s *Server) RemoveAlternateEmail(c *gin.Context) {
+	session := c.MustGet("session").(*SessionState)
+
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+
+	if !ensureAppleSession(session, uint(id)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
+		return
+	}
+
+	var req struct {
+		Email string `json:"email" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请输入邮箱地址"})
+		return
+	}
+
+	if err := session.HME.RemoveAlternateEmail(req.Email); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	// Update account's alternate emails in database
+	go func() {
+		if session.HME != nil {
+			fetchAndSaveAccountInfo(uint(id), session.HME)
+		}
+	}()
+
+	c.JSON(http.StatusOK, APIResponse{Success: true})
 }

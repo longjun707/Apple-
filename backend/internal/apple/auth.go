@@ -2,6 +2,7 @@ package apple
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
@@ -20,8 +21,19 @@ import (
 )
 
 var srpLog *log.Logger
+var debugMode bool
+
+// SetDebugMode enables/disables verbose SRP and auth logging
+func SetDebugMode(enabled bool) {
+	debugMode = enabled
+}
 
 func init() {
+	// Default: discard SRP debug logs; enable via SetDebugMode(true)
+	srpLog = log.New(io.Discard, "[SRP] ", log.LstdFlags)
+}
+
+func enableSRPLog() {
 	logPath := "srp_debug.log"
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
@@ -49,13 +61,20 @@ func (a *AppleAuth) GetSession() *Session {
 	return a.session
 }
 
-// generateOAuthState generates a random OAuth state string like browser does
+// generateOAuthState generates a cryptographically random OAuth state string
 func generateOAuthState() string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 32)
-	for i := range b {
-		b[i] = chars[time.Now().UnixNano()%int64(len(chars))]
-		time.Sleep(time.Nanosecond)
+	b := make([]byte, 28)
+	randBytes := make([]byte, 28)
+	if _, err := rand.Read(randBytes); err != nil {
+		// Fallback — should never happen
+		for i := range b {
+			b[i] = chars[time.Now().UnixNano()%int64(len(chars))]
+		}
+	} else {
+		for i := range b {
+			b[i] = chars[int(randBytes[i])%len(chars)]
+		}
 	}
 	return "auth-" + string(b[:8]) + "-" + string(b[8:12]) + "-" + string(b[12:16]) + "-" + string(b[16:20]) + "-" + string(b[20:28])
 }
@@ -174,16 +193,18 @@ func (a *AppleAuth) captureSessionHeaders(resp *http.Response) {
 	// Capture auth attributes - CRITICAL for 2FA requests to return myacinfo
 	if authAttr := resp.Header.Get("X-Apple-Auth-Attributes"); authAttr != "" {
 		a.session.AuthAttributes = authAttr
-		log.Printf("[CaptureHeaders] Got X-Apple-Auth-Attributes (len=%d)", len(authAttr))
+		if debugMode {
+			log.Printf("[CaptureHeaders] Got X-Apple-Auth-Attributes (len=%d)", len(authAttr))
+		}
 	}
 	a.session.LastActivity = time.Now()
 
 	// CRITICAL: Capture myacinfo cookie and set it on ALL Apple domains
-	// Go's cookie jar may not properly handle Domain=apple.com for subdomains
 	for _, cookie := range resp.Cookies() {
 		if cookie.Name == "myacinfo" && cookie.Value != "" {
-			log.Printf("[CaptureHeaders] Found myacinfo cookie (len=%d), setting on all Apple domains", len(cookie.Value))
-			// Set on all relevant Apple domains
+			if debugMode {
+				log.Printf("[CaptureHeaders] Found myacinfo cookie (len=%d)", len(cookie.Value))
+			}
 			domains := []string{
 				"https://apple.com",
 				"https://appleid.apple.com",
@@ -198,7 +219,6 @@ func (a *AppleAuth) captureSessionHeaders(resp *http.Response) {
 					Path:  "/",
 				}})
 			}
-			log.Printf("[CaptureHeaders] myacinfo set on %d domains", len(domains))
 		}
 	}
 }
@@ -536,6 +556,7 @@ func (a *AppleAuth) ExportSessionData() (token, scnt, sessionID, cookiesJSON str
 	sessionID = a.session.SessionID
 
 	var allCookies []SerializableCookie
+	var cookieNames []string
 	for _, d := range cookieDomains {
 		u, _ := url.Parse(d)
 		for _, c := range a.session.Client.Jar.Cookies(u) {
@@ -545,15 +566,22 @@ func (a *AppleAuth) ExportSessionData() (token, scnt, sessionID, cookiesJSON str
 				Domain: u.Host,
 				Path:   "/",
 			})
+			cookieNames = append(cookieNames, u.Host+":"+c.Name)
 		}
 	}
 	data, _ := json.Marshal(allCookies)
 	cookiesJSON = string(data)
+
+	srpLog.Printf("[Export] token_len=%d, scnt_len=%d, sessionID_len=%d, cookies=%d: %v",
+		len(token), len(scnt), len(sessionID), len(allCookies), cookieNames)
 	return
 }
 
 // RestoreAppleAuth restores a full AppleAuth from persisted session data
 func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
+	srpLog.Printf("[Restore] Input: token_len=%d, scnt_len=%d, sessionID_len=%d, cookiesJSON_len=%d",
+		len(token), len(scnt), len(sessionID), len(cookiesJSON))
+
 	auth := NewAppleAuth()
 	auth.session.mu.Lock()
 	auth.session.SessionToken = token
@@ -563,26 +591,54 @@ func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
 	auth.session.LastActivity = time.Now()
 
 	// Restore cookies into the jar
+	var restoredNames []string
 	if cookiesJSON != "" {
 		var cookies []SerializableCookie
 		if json.Unmarshal([]byte(cookiesJSON), &cookies) == nil {
-			// Group cookies by domain
-			byDomain := make(map[string][]*http.Cookie)
-			for _, c := range cookies {
-				byDomain[c.Domain] = append(byDomain[c.Domain], &http.Cookie{
+			// Deduplicate cookies by domain+name (keep last occurrence)
+			seen := make(map[string]bool)
+			var uniqueCookies []SerializableCookie
+			for i := len(cookies) - 1; i >= 0; i-- {
+				c := cookies[i]
+				key := c.Domain + "|" + c.Name
+				if !seen[key] {
+					seen[key] = true
+					uniqueCookies = append([]SerializableCookie{c}, uniqueCookies...)
+				}
+			}
+
+			// Group cookies by domain and set them
+			for _, c := range uniqueCookies {
+				u, _ := url.Parse("https://" + c.Domain)
+				auth.session.Client.Jar.SetCookies(u, []*http.Cookie{{
 					Name:  c.Name,
 					Value: c.Value,
 					Path:  c.Path,
-				})
+				}})
+				restoredNames = append(restoredNames, c.Domain+":"+c.Name)
 			}
-			for domain, cs := range byDomain {
-				u, _ := url.Parse("https://" + domain)
-				auth.session.Client.Jar.SetCookies(u, cs)
-			}
+			srpLog.Printf("[Restore] Restored %d unique cookies: %v", len(uniqueCookies), restoredNames)
+		}
+	}
+
+	// Also set myacinfo on key domains if we have a token
+	if token != "" {
+		for _, d := range []string{"https://apple.com", "https://appleid.apple.com", "https://idmsa.apple.com", "https://account.apple.com"} {
+			u, _ := url.Parse(d)
+			auth.session.Client.Jar.SetCookies(u, []*http.Cookie{{
+				Name:  "myacinfo",
+				Value: token,
+				Path:  "/",
+			}})
 		}
 	}
 
 	auth.session.mu.Unlock()
+
+	// Log restored cookies for debugging
+	srpLog.Printf("[Restore] Final cookie state after restore:")
+	auth.LogAllCookies()
+
 	return auth
 }
 
@@ -599,4 +655,29 @@ func (a *AppleAuth) ExportCookies() string {
 		}
 	}
 	return strings.Join(parts, "; ")
+}
+
+// LogAllCookies logs all cookies across all Apple domains for debugging
+func (a *AppleAuth) LogAllCookies() {
+	a.session.mu.RLock()
+	defer a.session.mu.RUnlock()
+
+	for _, d := range cookieDomains {
+		u, _ := url.Parse(d)
+		cookies := a.session.Client.Jar.Cookies(u)
+		if len(cookies) > 0 {
+			var names []string
+			for _, c := range cookies {
+				// Truncate value for logging
+				val := c.Value
+				if len(val) > 20 {
+					val = val[:20] + "..."
+				}
+				names = append(names, fmt.Sprintf("%s=%s", c.Name, val))
+			}
+			srpLog.Printf("  [%s] %v", u.Host, names)
+		}
+	}
+	srpLog.Printf("  SessionToken=%v, SCNT=%v, SessionID=%v",
+		a.session.SessionToken != "", a.session.SCNT != "", a.session.SessionID != "")
 }

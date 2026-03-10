@@ -86,10 +86,7 @@ func (s *Server) getSession(sessionID string) *SessionState {
 	}
 
 	now := time.Now()
-	auth := apple.NewAppleAuth()
 	session := &SessionState{
-		Auth:       auth,
-		HME:        apple.NewHMEClient(auth),
 		CreatedAt:  now,
 		LastActive: now,
 	}

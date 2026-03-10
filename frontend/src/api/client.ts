@@ -30,6 +30,17 @@ export interface AppleAccount {
   lastLogin?: string
   lastError?: string
   createdAt: string
+  sessionSavedAt?: string
+  isFamilyOrganizer?: boolean
+  familyMemberCount?: number
+  familyRole?: string // organizer, parent, adult, child
+  // Profile info
+  fullName?: string
+  birthday?: string
+  country?: string
+  alternateEmails?: string | string[] // JSON string or array of alternate emails
+  trustedDeviceCount?: number
+  twoFactorEnabled?: boolean
 }
 
 export interface AccountListResult {
@@ -195,6 +206,28 @@ export const api = {
 
   changePassword: (oldPassword: string, newPassword: string) =>
     request('PUT', '/admin/password', { oldPassword, newPassword }),
+
+  // Account info refresh
+  refreshAccountInfo: (id: number) =>
+    request<AppleAccount>('POST', `/accounts/${id}/refresh`),
+
+  // Alternate email management
+  sendAlternateEmailVerification: (accountId: number, email: string) =>
+    request<{ verificationId: string; address: string; length: number }>(
+      'POST',
+      `/accounts/${accountId}/alternate-email/send-verification`,
+      { email }
+    ),
+
+  verifyAlternateEmail: (accountId: number, email: string, verificationId: string, code: string) =>
+    request<{ address: string; vetted: boolean }>(
+      'POST',
+      `/accounts/${accountId}/alternate-email/verify`,
+      { email, verificationId, code }
+    ),
+
+  removeAlternateEmail: (accountId: number, email: string) =>
+    request('DELETE', `/accounts/${accountId}/alternate-email`, { email }),
 
   // Health
   health: () => request('GET', '/health'),
