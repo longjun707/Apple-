@@ -37,12 +37,15 @@ func (c *HMEClient) hmeHeaders(withAPIKey bool) map[string]string {
 	}
 
 	if withAPIKey {
-		headers["X-Apple-API-Key"] = HMEWidgetKey
+		headers["X-Apple-Api-Key"] = HMEWidgetKey
 	}
 
 	c.auth.session.mu.RLock()
 	if c.auth.session.SCNT != "" {
 		headers["scnt"] = c.auth.session.SCNT
+	}
+	if c.auth.session.SessionID != "" {
+		headers["X-Apple-ID-Session-Id"] = c.auth.session.SessionID
 	}
 	c.auth.session.mu.RUnlock()
 
@@ -105,27 +108,28 @@ func (c *HMEClient) Bootstrap() error {
 	c.logCookies()
 
 	// Step 1: Bootstrap portal
-	resp, err := c.doRequest("GET", BootstrapURL, nil, false)
+	resp, err := c.doRequest("GET", BootstrapURL, nil, true)
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	srpLog.Printf("[HME] bootstrap status=%d, body_len=%d", resp.StatusCode, len(body))
+	srpLog.Printf("[HME] bootstrap status=%d, body_len=%d, body=%s", resp.StatusCode, len(body), string(body[:min(len(body), 500)]))
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("bootstrap failed: HTTP %d - %s", resp.StatusCode, string(body[:min(len(body), 200)]))
 	}
 
-	// Step 2: Token exchange
-	resp, err = c.doRequest("GET", TokenURL, nil, false)
+	// Step 2: Token exchange (non-fatal — HME API may work without it)
+	resp, err = c.doRequest("GET", TokenURL, nil, true)
 	if err != nil {
-		return fmt.Errorf("token exchange failed: %w", err)
-	}
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	srpLog.Printf("[HME] token exchange status=%d, body_len=%d", resp.StatusCode, len(body))
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("token exchange failed: HTTP %d - %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+		srpLog.Printf("[HME] token exchange error (non-fatal): %v", err)
+	} else {
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		srpLog.Printf("[HME] token exchange status=%d, body_len=%d, body=%s", resp.StatusCode, len(body), string(body[:min(len(body), 500)]))
+		if resp.StatusCode != 200 {
+			srpLog.Printf("[HME] token exchange failed (non-fatal): HTTP %d", resp.StatusCode)
+		}
 	}
 
 	c.bootstrapped = true
@@ -135,16 +139,36 @@ func (c *HMEClient) Bootstrap() error {
 
 // exchangeAccountSession exchanges idmsa session for account.apple.com session
 func (c *HMEClient) exchangeAccountSession() error {
-	authURL := AuthBase + "/authorize/signin?" +
-		"client_id=" + HMEWidgetKey +
-		"&redirect_uri=https://account.apple.com" +
+	authURL := AuthBase + "/authorize/signin" +
+		"?client_id=" + HMEWidgetKey +
+		"&redirect_uri=https%3A%2F%2Faccount.apple.com" +
 		"&response_type=code" +
 		"&response_mode=web_message"
 
-	headers := c.auth.authHeaders()
-	headers["X-Apple-OAuth-Client-Id"] = HMEWidgetKey
-	headers["X-Apple-OAuth-Redirect-URI"] = "https://account.apple.com"
-	headers["X-Apple-Widget-Key"] = HMEWidgetKey
+	// Use account.apple.com specific headers, not iCloud headers
+	c.auth.session.mu.RLock()
+	headers := map[string]string{
+		"Accept":                            "application/json",
+		"Content-Type":                      "application/json",
+		"User-Agent":                        ChromeUA,
+		"X-Apple-OAuth-Client-Id":           HMEWidgetKey,
+		"X-Apple-OAuth-Client-Type":         "firstPartyAuth",
+		"X-Apple-OAuth-Redirect-URI":        "https://account.apple.com",
+		"X-Apple-OAuth-Require-Grant-Code":  "true",
+		"X-Apple-OAuth-Response-Mode":       "web_message",
+		"X-Apple-OAuth-Response-Type":       "code",
+		"X-Apple-Widget-Key":                HMEWidgetKey,
+		"X-Requested-With":                  "XMLHttpRequest",
+		"Origin":                            "https://account.apple.com",
+		"Referer":                           "https://account.apple.com/",
+	}
+	if c.auth.session.SCNT != "" {
+		headers["scnt"] = c.auth.session.SCNT
+	}
+	if c.auth.session.SessionID != "" {
+		headers["X-Apple-ID-Session-Id"] = c.auth.session.SessionID
+	}
+	c.auth.session.mu.RUnlock()
 
 	req, _ := http.NewRequest("GET", authURL, nil)
 	for k, v := range headers {
@@ -157,7 +181,22 @@ func (c *HMEClient) exchangeAccountSession() error {
 	}
 	defer resp.Body.Close()
 	c.auth.captureSessionHeaders(resp)
-	srpLog.Printf("[HME] account session exchange: status=%d", resp.StatusCode)
+	exBody, _ := io.ReadAll(resp.Body)
+	srpLog.Printf("[HME] account session exchange: status=%d, body=%s", resp.StatusCode, string(exBody[:min(len(exBody), 500)]))
+
+	// If authorize/signin failed, try visiting account.apple.com directly (like Python fallback)
+	if resp.StatusCode != 200 {
+		srpLog.Printf("[HME] trying account.apple.com fallback...")
+		fallbackReq, _ := http.NewRequest("GET", "https://account.apple.com/", nil)
+		fallbackReq.Header.Set("User-Agent", ChromeUA)
+		fallbackReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+		fresp, ferr := c.auth.session.Client.Do(fallbackReq)
+		if ferr == nil {
+			io.ReadAll(fresp.Body)
+			fresp.Body.Close()
+			srpLog.Printf("[HME] account.apple.com fallback: status=%d", fresp.StatusCode)
+		}
+	}
 	return nil
 }
 
@@ -261,15 +300,16 @@ func (c *HMEClient) GenerateEmail() (string, error) {
 }
 
 // CompleteEmail activates a generated HME address
-func (c *HMEClient) CompleteEmail(email, label, note string) (*HMEEmail, error) {
+func (c *HMEClient) CompleteEmail(email, label, note, forwardToEmail string) (*HMEEmail, error) {
 	if err := c.Bootstrap(); err != nil {
 		return nil, err
 	}
 
 	req := HMECreateRequest{
-		EmailAddress: email,
-		Label:        label,
-		Note:         note,
+		EmailAddress:   email,
+		Label:          label,
+		Note:           note,
+		ForwardToEmail: forwardToEmail,
 	}
 
 	resp, err := c.doRequest("PUT", AccountBase+"/email/private/add/complete", req, true)
@@ -292,7 +332,7 @@ func (c *HMEClient) CompleteEmail(email, label, note string) (*HMEEmail, error) 
 }
 
 // CreateEmail creates and activates a new HME address (full flow)
-func (c *HMEClient) CreateEmail(label, note string) (*HMEEmail, error) {
+func (c *HMEClient) CreateEmail(label, note, forwardToEmail string) (*HMEEmail, error) {
 	// Step 1: Generate address
 	email, err := c.GenerateEmail()
 	if err != nil {
@@ -308,7 +348,7 @@ func (c *HMEClient) CreateEmail(label, note string) (*HMEEmail, error) {
 	}
 
 	// Step 2: Complete creation
-	return c.CompleteEmail(email, label, note)
+	return c.CompleteEmail(email, label, note, forwardToEmail)
 }
 
 // DeleteEmail deletes an HME address
@@ -382,7 +422,7 @@ func (c *HMEClient) GetAccountInfo() (*AccountInfo, error) {
 }
 
 // BatchCreateEmails creates multiple HME addresses
-func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int) ([]HMEEmail, []error) {
+func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int, forwardToEmail string) ([]HMEEmail, []error) {
 	results := make([]HMEEmail, 0, count)
 	errors := make([]error, 0)
 
@@ -390,7 +430,7 @@ func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int
 		label := fmt.Sprintf("%s-%d", labelPrefix, i+1)
 		note := time.Now().Format("Auto 2006-01-02 15:04")
 
-		hme, err := c.CreateEmail(label, note)
+		hme, err := c.CreateEmail(label, note, forwardToEmail)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("email %d: %w", i+1, err))
 		} else {

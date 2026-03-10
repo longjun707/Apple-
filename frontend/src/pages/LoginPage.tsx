@@ -1,9 +1,31 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useAuthStore } from '@/stores/authStore'
-import { User, Lock, Shield } from 'lucide-react'
+import { Lock, Shield } from 'lucide-react'
 import Button from '@/components/ui/Button'
+
+const CREDENTIALS_KEY = 'admin-credentials'
+
+function getSavedCredentials(): { username: string; password: string } | null {
+  try {
+    const saved = localStorage.getItem(CREDENTIALS_KEY)
+    if (saved) {
+      return JSON.parse(saved)
+    }
+  } catch {
+    // ignore
+  }
+  return null
+}
+
+function saveCredentials(username: string, password: string) {
+  localStorage.setItem(CREDENTIALS_KEY, JSON.stringify({ username, password }))
+}
+
+function clearCredentials() {
+  localStorage.removeItem(CREDENTIALS_KEY)
+}
 
 export default function LoginPage() {
   const [username, setUsername] = useState('')
@@ -13,6 +35,15 @@ export default function LoginPage() {
 
   const { setState, setAdmin } = useAuthStore()
 
+  // Load saved credentials on mount
+  useEffect(() => {
+    const saved = getSavedCredentials()
+    if (saved) {
+      setUsername(saved.username)
+      setPassword(saved.password)
+    }
+  }, [])
+
   const loginMutation = useMutation({
     mutationFn: () => api.adminLogin(username, password, rememberMe),
     onSuccess: (res) => {
@@ -21,6 +52,12 @@ export default function LoginPage() {
         return
       }
       if (res.data) {
+        // Save or clear credentials based on rememberMe
+        if (rememberMe) {
+          saveCredentials(username, password)
+        } else {
+          clearCredentials()
+        }
         setAdmin(res.data)
         setState('authenticated')
       }
@@ -102,7 +139,7 @@ export default function LoginPage() {
                 onChange={(e) => setRememberMe(e.target.checked)}
                 className="w-4 h-4 rounded border-gray-300 text-apple-blue focus:ring-apple-blue/30"
               />
-              <span className="text-sm text-gray-600">保持登录状态</span>
+              <span className="text-sm text-gray-600">记住密码</span>
             </label>
 
             <Button

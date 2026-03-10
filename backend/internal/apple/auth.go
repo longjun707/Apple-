@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -21,8 +22,7 @@ import (
 var srpLog *log.Logger
 
 func init() {
-	// 使用绝对路径确保热更新时日志写入正确位置
-	logPath := `D:\DM\apple隐私邮箱创建\apple-hme-manager\backend\srp_debug.log`
+	logPath := "srp_debug.log"
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		srpLog = log.New(os.Stderr, "[SRP] ", log.LstdFlags)
@@ -431,9 +431,13 @@ func (a *AppleAuth) ExportCookies() string {
 	a.session.mu.RLock()
 	defer a.session.mu.RUnlock()
 
+	domains := []string{"https://apple.com", "https://idmsa.apple.com", "https://appleid.apple.com"}
 	var parts []string
-	for _, cookie := range a.session.Client.Jar.Cookies(nil) {
-		parts = append(parts, fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
+	for _, d := range domains {
+		u, _ := url.Parse(d)
+		for _, cookie := range a.session.Client.Jar.Cookies(u) {
+			parts = append(parts, fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
+		}
 	}
 	return strings.Join(parts, "; ")
 }

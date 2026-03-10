@@ -3,6 +3,8 @@ package store
 import (
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"gorm.io/driver/mysql"
@@ -21,15 +23,29 @@ type Config struct {
 	DBName   string
 }
 
-// DefaultConfig returns the default database configuration
+// DefaultConfig returns the default database configuration from environment variables
 func DefaultConfig() *Config {
-	return &Config{
-		Host:     "49.234.201.242",
-		Port:     3306,
-		User:     "icloud",
-		Password: "SzZh3wYNdTGCyLAn",
-		DBName:   "icloud",
+	port := 3306
+	if p := os.Getenv("DB_PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil {
+			port = v
+		}
 	}
+
+	return &Config{
+		Host:     getEnvOrDefault("DB_HOST", "127.0.0.1"),
+		Port:     port,
+		User:     getEnvOrDefault("DB_USER", "root"),
+		Password: os.Getenv("DB_PASSWORD"),
+		DBName:   getEnvOrDefault("DB_NAME", "icloud"),
+	}
+}
+
+func getEnvOrDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
 }
 
 // InitDB initializes the database connection

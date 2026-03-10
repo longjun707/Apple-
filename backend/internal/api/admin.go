@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"apple-hme-manager/internal/apple"
@@ -30,6 +31,24 @@ type UpdateAccountRequest struct {
 	AppleID  string `json:"appleId" binding:"required"`
 	Password string `json:"password"` // 留空则不修改
 	Remark   string `json:"remark"`
+}
+
+// clampPageSize enforces pageSize bounds [1, 100], defaulting to 20.
+func clampPageSize(pageSize int) int {
+	if pageSize < 1 {
+		return 20
+	}
+	if pageSize > 100 {
+		return 100
+	}
+	return pageSize
+}
+
+// escapeLike escapes SQL LIKE wildcards.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
 }
 
 // AdminLogin handles admin login
@@ -89,10 +108,6 @@ func (s *Server) AdminLogout(c *gin.Context) {
 // AdminInfo returns current admin info
 func (s *Server) AdminInfo(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
@@ -104,12 +119,6 @@ func (s *Server) AdminInfo(c *gin.Context) {
 
 // ListAccounts returns all Apple accounts
 func (s *Server) ListAccounts(c *gin.Context) {
-	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
-
 	if store.DB == nil {
 		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
 		return
@@ -117,6 +126,7 @@ func (s *Server) ListAccounts(c *gin.Context) {
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	pageSize = clampPageSize(pageSize)
 
 	accounts, total, err := store.NewAccountRepo().List(page, pageSize)
 	if err != nil {
@@ -137,12 +147,6 @@ func (s *Server) ListAccounts(c *gin.Context) {
 
 // CreateAccount creates a new Apple account
 func (s *Server) CreateAccount(c *gin.Context) {
-	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
-
 	var req AccountRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
@@ -156,7 +160,7 @@ func (s *Server) CreateAccount(c *gin.Context) {
 
 	account := &store.Account{
 		AppleID:  req.AppleID,
-		Password: req.Password, // Note: In production, encrypt this
+		Password: req.Password,
 		Remark:   req.Remark,
 		Status:   1,
 	}
@@ -171,12 +175,6 @@ func (s *Server) CreateAccount(c *gin.Context) {
 
 // UpdateAccount updates an Apple account
 func (s *Server) UpdateAccount(c *gin.Context) {
-	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
-
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	if id == 0 {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
@@ -207,12 +205,6 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 
 // DeleteAccount deletes an Apple account
 func (s *Server) DeleteAccount(c *gin.Context) {
-	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
-
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	if id == 0 {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
@@ -230,10 +222,6 @@ func (s *Server) DeleteAccount(c *gin.Context) {
 // LoginAppleAccount logs into an Apple account and fetches HME
 func (s *Server) LoginAppleAccount(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	if id == 0 {
@@ -314,8 +302,8 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 // Verify2FAForAccount verifies 2FA for an Apple account
 func (s *Server) Verify2FAForAccount(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 || session.Auth == nil {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录或会话已过期"})
+	if session.Auth == nil {
+		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "请先登录Apple账户"})
 		return
 	}
 
@@ -349,8 +337,8 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 // RequestSMSForAccount requests SMS 2FA code for an Apple account
 func (s *Server) RequestSMSForAccount(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 || session.Auth == nil {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录或会话已过期"})
+	if session.Auth == nil {
+		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "请先登录Apple账户"})
 		return
 	}
 
@@ -373,10 +361,6 @@ func (s *Server) RequestSMSForAccount(c *gin.Context) {
 // GetAccountHME gets HME list for an account
 func (s *Server) GetAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
@@ -440,10 +424,6 @@ func syncHMEToDB(accountID uint, emails []apple.HMEEmail) {
 // CreateAccountHME creates HME for an account
 func (s *Server) CreateAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
@@ -483,10 +463,6 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 // DeleteAccountHME deletes an HME for an account
 func (s *Server) DeleteAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 
 	accountID, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	hmeId := c.Param("hmeId")
@@ -516,12 +492,6 @@ func (s *Server) DeleteAccountHME(c *gin.Context) {
 
 // AdminStats returns aggregate dashboard stats
 func (s *Server) AdminStats(c *gin.Context) {
-	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
-
 	if store.DB == nil {
 		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
 		return
@@ -546,12 +516,6 @@ func (s *Server) AdminStats(c *gin.Context) {
 
 // AdminListAllHME returns global HME list with account info
 func (s *Server) AdminListAllHME(c *gin.Context) {
-	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
-
 	if store.DB == nil {
 		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
 		return
@@ -559,6 +523,7 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	pageSize = clampPageSize(pageSize)
 	search := c.Query("search")
 
 	type HMEWithAccount struct {
@@ -574,8 +539,8 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 		Joins("LEFT JOIN accounts ON accounts.id = hme_records.account_id").
 		Where("hme_records.deleted_at IS NULL")
 	if search != "" {
-		like := "%" + search + "%"
-		countQuery = countQuery.Where("hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ?", like, like, like)
+		like := "%" + escapeLike(search) + "%"
+		countQuery = countQuery.Where("hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ? ESCAPE '\\'", like, like, like)
 	}
 	countQuery.Count(&total)
 
@@ -585,8 +550,8 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 		Joins("LEFT JOIN accounts ON accounts.id = hme_records.account_id").
 		Where("hme_records.deleted_at IS NULL")
 	if search != "" {
-		like := "%" + search + "%"
-		dataQuery = dataQuery.Where("hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ?", like, like, like)
+		like := "%" + escapeLike(search) + "%"
+		dataQuery = dataQuery.Where("hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ? ESCAPE '\\'", like, like, like)
 	}
 
 	offset := (page - 1) * pageSize
@@ -610,10 +575,6 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 // AdminChangePassword changes admin password
 func (s *Server) AdminChangePassword(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 
 	var req struct {
 		OldPassword string `json:"oldPassword" binding:"required"`
@@ -652,10 +613,6 @@ func (s *Server) AdminChangePassword(c *gin.Context) {
 // BatchCreateAccountHME batch creates HME for an account
 func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.AdminID == 0 {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
-		return
-	}
 
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 

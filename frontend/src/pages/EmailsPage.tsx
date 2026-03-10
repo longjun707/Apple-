@@ -91,7 +91,7 @@ export default function EmailsPage() {
                 复制当前页
               </Button>
               <Button variant="ghost" size="sm" onClick={handleExport} icon={<Download className="w-4 h-4" />}>
-                导出
+                导出当前页
               </Button>
             </>
           )}

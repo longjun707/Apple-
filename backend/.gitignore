@@ -12,6 +12,13 @@ session_cache/
 # Static (built frontend)
 static/
 
+# Debug files
+srp_debug.log
+verify_srp*.py
+
 # IDE
 .idea/
 .vscode/
+
+# Environment
+.env

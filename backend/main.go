@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"apple-hme-manager/internal/api"
 	"apple-hme-manager/internal/store"
@@ -36,8 +37,12 @@ func main() {
 	r := gin.Default()
 
 	// CORS configuration
+	allowedOrigins := []string{"http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"}
+	if extra := os.Getenv("CORS_ORIGINS"); extra != "" {
+		allowedOrigins = strings.Split(extra, ",")
+	}
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"},
+		AllowOrigins:     allowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "X-Session-ID"},
 		ExposeHeaders:    []string{"X-Session-ID"},
@@ -53,31 +58,39 @@ func main() {
 	// Routes
 	apiGroup := r.Group("/api")
 	{
-		// Admin auth routes
-		admin := apiGroup.Group("/admin")
-		{
-		admin.POST("/login", server.AdminLogin)
-			admin.POST("/logout", server.AdminLogout)
-			admin.GET("/info", server.AdminInfo)
-			admin.GET("/stats", server.AdminStats)
-			admin.GET("/hme", server.AdminListAllHME)
-			admin.PUT("/password", server.AdminChangePassword)
-		}
+		// Public routes (no auth required)
+		apiGroup.GET("/health", server.Health)
+		apiGroup.POST("/admin/login", server.AdminLogin)
 
-		// Apple Account management routes
-		accounts := apiGroup.Group("/accounts")
+		// Protected routes (require admin auth)
+		protected := apiGroup.Group("")
+		protected.Use(server.AdminAuthMiddleware())
 		{
-			accounts.GET("", server.ListAccounts)
-			accounts.POST("", server.CreateAccount)
-			accounts.PUT("/:id", server.UpdateAccount)
-			accounts.DELETE("/:id", server.DeleteAccount)
-			accounts.POST("/:id/login", server.LoginAppleAccount)
-			accounts.POST("/:id/2fa", server.Verify2FAForAccount)
-			accounts.POST("/:id/request-sms", server.RequestSMSForAccount)
-			accounts.GET("/:id/hme", server.GetAccountHME)
-			accounts.POST("/:id/hme", server.CreateAccountHME)
-		accounts.POST("/:id/hme/batch", server.BatchCreateAccountHME)
-			accounts.DELETE("/:id/hme/:hmeId", server.DeleteAccountHME)
+			// Admin routes
+			admin := protected.Group("/admin")
+			{
+				admin.POST("/logout", server.AdminLogout)
+				admin.GET("/info", server.AdminInfo)
+				admin.GET("/stats", server.AdminStats)
+				admin.GET("/hme", server.AdminListAllHME)
+				admin.PUT("/password", server.AdminChangePassword)
+			}
+
+			// Apple Account management routes
+			accounts := protected.Group("/accounts")
+			{
+				accounts.GET("", server.ListAccounts)
+				accounts.POST("", server.CreateAccount)
+				accounts.PUT("/:id", server.UpdateAccount)
+				accounts.DELETE("/:id", server.DeleteAccount)
+				accounts.POST("/:id/login", server.LoginAppleAccount)
+				accounts.POST("/:id/2fa", server.Verify2FAForAccount)
+				accounts.POST("/:id/request-sms", server.RequestSMSForAccount)
+				accounts.GET("/:id/hme", server.GetAccountHME)
+				accounts.POST("/:id/hme", server.CreateAccountHME)
+				accounts.POST("/:id/hme/batch", server.BatchCreateAccountHME)
+				accounts.DELETE("/:id/hme/:hmeId", server.DeleteAccountHME)
+			}
 		}
 
 		// Legacy auth routes (for backward compatibility)
@@ -101,9 +114,6 @@ func main() {
 			hme.DELETE("/:id", server.DeleteHME)
 			hme.GET("/forward-emails", server.GetForwardEmails)
 		}
-
-		// Health check
-		apiGroup.GET("/health", server.Health)
 	}
 
 	// Serve static files (frontend) in production

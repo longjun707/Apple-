@@ -1,8 +1,11 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"sync"
+	"time"
 
 	"apple-hme-manager/internal/apple"
 	"apple-hme-manager/internal/store"
@@ -16,6 +19,13 @@ type Server struct {
 	sessions map[string]*SessionState
 }
 
+// Session TTL constants
+const (
+	DefaultSessionTTL    = 2 * time.Hour
+	RememberMeSessionTTL = 7 * 24 * time.Hour
+	SessionCleanInterval = 10 * time.Minute
+)
+
 // SessionState holds per-session state
 type SessionState struct {
 	Auth       *apple.AppleAuth
@@ -25,28 +35,63 @@ type SessionState struct {
 	AdminID    uint   // Admin user ID
 	AdminName  string // Admin username
 	RememberMe bool   // Whether to keep session longer
+	CreatedAt  time.Time
+	LastActive time.Time
 }
 
 // NewServer creates a new API server
 func NewServer() *Server {
-	return &Server{
+	s := &Server{
 		sessions: make(map[string]*SessionState),
+	}
+	go s.cleanExpiredSessions()
+	return s
+}
+
+// cleanExpiredSessions periodically removes expired sessions
+func (s *Server) cleanExpiredSessions() {
+	ticker := time.NewTicker(SessionCleanInterval)
+	for range ticker.C {
+		now := time.Now()
+		s.mu.Lock()
+		for id, sess := range s.sessions {
+			ttl := DefaultSessionTTL
+			if sess.RememberMe {
+				ttl = RememberMeSessionTTL
+			}
+			if now.Sub(sess.LastActive) > ttl {
+				delete(s.sessions, id)
+			}
+		}
+		s.mu.Unlock()
 	}
 }
 
-// getSession retrieves or creates a session
+// getSession retrieves or creates a session, checking expiry
 func (s *Server) getSession(sessionID string) *SessionState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if session, ok := s.sessions[sessionID]; ok {
-		return session
+		ttl := DefaultSessionTTL
+		if session.RememberMe {
+			ttl = RememberMeSessionTTL
+		}
+		if time.Since(session.LastActive) > ttl {
+			delete(s.sessions, sessionID)
+		} else {
+			session.LastActive = time.Now()
+			return session
+		}
 	}
 
+	now := time.Now()
 	auth := apple.NewAppleAuth()
 	session := &SessionState{
-		Auth: auth,
-		HME:  apple.NewHMEClient(auth),
+		Auth:       auth,
+		HME:        apple.NewHMEClient(auth),
+		CreatedAt:  now,
+		LastActive: now,
 	}
 	s.sessions[sessionID] = session
 	return session
@@ -81,7 +126,7 @@ type APIResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
-// Middleware to extract session ID
+// SessionMiddleware extracts or generates session ID
 func (s *Server) SessionMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := c.GetHeader("X-Session-ID")
@@ -89,12 +134,24 @@ func (s *Server) SessionMiddleware() gin.HandlerFunc {
 			sessionID = c.Query("session")
 		}
 		if sessionID == "" {
-			// Generate new session ID
 			sessionID = generateSessionID()
 		}
 		c.Set("sessionID", sessionID)
 		c.Set("session", s.getSession(sessionID))
 		c.Header("X-Session-ID", sessionID)
+		c.Next()
+	}
+}
+
+// AdminAuthMiddleware checks that the session belongs to an authenticated admin
+func (s *Server) AdminAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := c.MustGet("session").(*SessionState)
+		if session.AdminID == 0 {
+			c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "未登录"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -390,12 +447,12 @@ func (s *Server) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]string{"status": "ok"}})
 }
 
-// Helper function
+// generateSessionID creates a cryptographically random session ID
 func generateSessionID() string {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 32)
-	for i := range b {
-		b[i] = chars[i%len(chars)]
+	if _, err := rand.Read(b); err != nil {
+		// Fallback should never happen, but just in case
+		panic("crypto/rand failed: " + err.Error())
 	}
-	return string(b)
+	return hex.EncodeToString(b)
 }
