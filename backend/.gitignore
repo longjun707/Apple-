@@ -1,0 +1,17 @@
+# Air
+tmp/
+build-errors.log
+
+# Binary
+*.exe
+apple-hme-manager
+
+# Session cache
+session_cache/
+
+# Static (built frontend)
+static/
+
+# IDE
+.idea/
+.vscode/

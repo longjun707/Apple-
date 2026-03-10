@@ -1,0 +1,353 @@
+package apple
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"time"
+)
+
+// HMEClient handles Hide My Email operations
+type HMEClient struct {
+	auth         *AppleAuth
+	bootstrapped bool
+}
+
+// NewHMEClient creates a new HME client from authenticated session
+func NewHMEClient(auth *AppleAuth) *HMEClient {
+	return &HMEClient{
+		auth: auth,
+	}
+}
+
+// hmeHeaders returns headers for HME API requests
+func (c *HMEClient) hmeHeaders(withAPIKey bool) map[string]string {
+	headers := map[string]string{
+		"Accept":                    "application/json",
+		"Content-Type":              "application/json",
+		"Origin":                    "https://account.apple.com",
+		"Referer":                   "https://account.apple.com/",
+		"User-Agent":                ChromeUA,
+		"X-Apple-I-Request-Context": "ca",
+		"X-Apple-I-Timezone":        "Asia/Shanghai",
+		"X-Apple-I-FD-Client-Info":  `{"U":"` + ChromeUA + `","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`,
+	}
+
+	if withAPIKey {
+		headers["X-Apple-API-Key"] = HMEWidgetKey
+	}
+
+	c.auth.session.mu.RLock()
+	if c.auth.session.SCNT != "" {
+		headers["scnt"] = c.auth.session.SCNT
+	}
+	c.auth.session.mu.RUnlock()
+
+	return headers
+}
+
+// doRequest performs an HME API request
+func (c *HMEClient) doRequest(method, urlPath string, body interface{}, withAPIKey bool) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		jsonData, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		bodyReader = bytes.NewReader(jsonData)
+	}
+
+	req, err := http.NewRequest(method, urlPath, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	for k, v := range c.hmeHeaders(withAPIKey) {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.auth.session.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update SCNT from response
+	if scnt := resp.Header.Get("scnt"); scnt != "" {
+		c.auth.session.mu.Lock()
+		c.auth.session.SCNT = scnt
+		c.auth.session.mu.Unlock()
+	}
+
+	return resp, nil
+}
+
+// Bootstrap initializes the HME session
+func (c *HMEClient) Bootstrap() error {
+	if c.bootstrapped {
+		return nil
+	}
+
+	// Ensure myacinfo cookie exists
+	c.ensureMyacinfo()
+
+	// Step 1: Bootstrap portal
+	resp, err := c.doRequest("GET", BootstrapURL, nil, false)
+	if err != nil {
+		return fmt.Errorf("bootstrap failed: %w", err)
+	}
+	resp.Body.Close()
+
+	// Step 2: Token exchange
+	resp, err = c.doRequest("GET", TokenURL, nil, false)
+	if err != nil {
+		return fmt.Errorf("token exchange failed: %w", err)
+	}
+	resp.Body.Close()
+
+	c.bootstrapped = true
+	return nil
+}
+
+// ensureMyacinfo sets myacinfo cookie if we have session token
+func (c *HMEClient) ensureMyacinfo() {
+	c.auth.session.mu.Lock()
+	defer c.auth.session.mu.Unlock()
+
+	if c.auth.session.SessionToken == "" {
+		return
+	}
+
+	// Check if myacinfo already exists
+	u, _ := url.Parse("https://apple.com")
+	cookies := c.auth.session.Client.Jar.Cookies(u)
+	for _, cookie := range cookies {
+		if cookie.Name == "myacinfo" {
+			return
+		}
+	}
+
+	// Set myacinfo cookie
+	cookie := &http.Cookie{
+		Name:   "myacinfo",
+		Value:  c.auth.session.SessionToken,
+		Domain: ".apple.com",
+		Path:   "/",
+	}
+	c.auth.session.Client.Jar.SetCookies(u, []*http.Cookie{cookie})
+}
+
+// ListEmails returns all HME addresses
+func (c *HMEClient) ListEmails() ([]HMEEmail, error) {
+	if err := c.Bootstrap(); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doRequest("GET", AccountBase+"/email/private", nil, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list HME failed: HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	var result HMEListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result.PrivateEmailList, nil
+}
+
+// GenerateEmail generates a new random HME address (not activated yet)
+func (c *HMEClient) GenerateEmail() (string, error) {
+	if err := c.Bootstrap(); err != nil {
+		return "", err
+	}
+
+	resp, err := c.doRequest("POST", AccountBase+"/email/private/add", map[string]interface{}{}, false)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("generate HME failed: HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		EmailAddress string `json:"emailAddress"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	return result.EmailAddress, nil
+}
+
+// CompleteEmail activates a generated HME address
+func (c *HMEClient) CompleteEmail(email, label, note string) (*HMEEmail, error) {
+	if err := c.Bootstrap(); err != nil {
+		return nil, err
+	}
+
+	req := HMECreateRequest{
+		EmailAddress: email,
+		Label:        label,
+		Note:         note,
+	}
+
+	resp, err := c.doRequest("PUT", AccountBase+"/email/private/add/complete", req, true)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("complete HME failed: HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	var result HMEEmail
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// CreateEmail creates and activates a new HME address (full flow)
+func (c *HMEClient) CreateEmail(label, note string) (*HMEEmail, error) {
+	// Step 1: Generate address
+	email, err := c.GenerateEmail()
+	if err != nil {
+		return nil, err
+	}
+
+	// Auto-generate label if empty
+	if label == "" {
+		label = fmt.Sprintf("Auto-%d", time.Now().Unix()%100000)
+	}
+	if note == "" {
+		note = time.Now().Format("Auto 2006-01-02 15:04")
+	}
+
+	// Step 2: Complete creation
+	return c.CompleteEmail(email, label, note)
+}
+
+// DeleteEmail deletes an HME address
+func (c *HMEClient) DeleteEmail(id string) error {
+	if err := c.Bootstrap(); err != nil {
+		return err
+	}
+
+	req := map[string]string{"id": id}
+	resp, err := c.doRequest("POST", AccountBase+"/email/private/delete", req, false)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete HME failed: HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// GetForwardEmails returns available forward-to email addresses
+func (c *HMEClient) GetForwardEmails() ([]string, error) {
+	if err := c.Bootstrap(); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doRequest("GET", AccountBase+"/forwardemail", nil, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("get forward emails failed: HTTP %d", resp.StatusCode)
+	}
+
+	var result ForwardEmailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result.ForwardToOptions.AvailableEmails, nil
+}
+
+// GetAccountInfo returns account information
+func (c *HMEClient) GetAccountInfo() (*AccountInfo, error) {
+	if err := c.Bootstrap(); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doRequest("GET", AccountBase, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get account info failed: HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	var result AccountInfo
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// BatchCreateEmails creates multiple HME addresses
+func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int) ([]HMEEmail, []error) {
+	results := make([]HMEEmail, 0, count)
+	errors := make([]error, 0)
+
+	for i := 0; i < count; i++ {
+		label := fmt.Sprintf("%s-%d", labelPrefix, i+1)
+		note := time.Now().Format("Auto 2006-01-02 15:04")
+
+		hme, err := c.CreateEmail(label, note)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("email %d: %w", i+1, err))
+		} else {
+			results = append(results, *hme)
+		}
+
+		// Delay between creations
+		if i < count-1 && delayMs > 0 {
+			time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		}
+	}
+
+	return results, errors
+}
+
+// ExtendSession extends the session lifetime
+func (c *HMEClient) ExtendSession() error {
+	resp, err := c.doRequest("POST", "https://appleid.apple.com/session/extend", map[string]interface{}{}, true)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("extend session failed: HTTP %d", resp.StatusCode)
+	}
+
+	return nil
+}
