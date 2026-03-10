@@ -4,7 +4,7 @@ import { api, type AppleAccount, type PhoneNumber } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
   Plus, Trash2, LogIn, Mail, RefreshCw,
-  Edit, Loader2, Users, Shield, Smartphone,
+  Edit, Loader2, Users, Shield, Smartphone, Eye,
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog'
@@ -248,6 +248,11 @@ export default function AccountsPage() {
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex justify-end gap-1">
+                        <Button
+                          size="sm" variant="ghost" title="查看详情"
+                          onClick={() => setSelectedAccount(account)}
+                          icon={<Eye className="w-4 h-4" />}
+                        />
                         <Button
                           size="sm" variant="ghost" title="登录 Apple 账户"
                           onClick={() => loginMutation.mutate(account.id)}
