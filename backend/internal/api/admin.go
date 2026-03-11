@@ -1056,17 +1056,16 @@ func (s *Server) UpdateAutoHMESettings(c *gin.Context) {
 
 // TriggerAutoHME manually triggers the auto HME creation
 func (s *Server) TriggerAutoHME(c *gin.Context) {
-	autoHMEStatus.mu.Lock()
+	autoHMEStatus.mu.RLock()
 	if autoHMEStatus.Running {
-		autoHMEStatus.mu.Unlock()
+		autoHMEStatus.mu.RUnlock()
 		c.JSON(http.StatusOK, APIResponse{Success: false, Error: "任务正在执行中"})
 		return
 	}
-	// Mark as running under the same lock to prevent TOCTOU race
-	autoHMEStatus.Running = true
 	countPerAcc := autoHMEStatus.CountPerAccount
-	autoHMEStatus.mu.Unlock()
+	autoHMEStatus.mu.RUnlock()
 
+	// Let AutoCreateHMEForAllAccounts set Running flag itself
 	go func() {
 		addAutoHMELog("info", "手动触发自动创建 HME 任务...")
 		AutoCreateHMEForAllAccounts(countPerAcc)
