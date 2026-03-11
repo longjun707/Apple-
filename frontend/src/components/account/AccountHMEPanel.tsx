@@ -159,10 +159,10 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
     return filteredList.slice(start, start + pageSize)
   }, [filteredList, currentPage, pageSize])
 
-  // Reset to page 1 when filter/search changes
+  // Reset to page 1 when filter/search changes or account changes
   useEffect(() => {
     setCurrentPage(1)
-  }, [searchQuery, filterStatus])
+  }, [searchQuery, filterStatus, account.id])
 
   const isFiltered = searchQuery !== '' || filterStatus !== 'all'
 

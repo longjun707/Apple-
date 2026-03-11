@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -612,13 +611,8 @@ func (c *HMEClient) GetAccountProfile() (*AccountProfileInfo, error) {
 	manageResp, err := c.doAccountRequest("GET", AccountBase, nil)
 	if err == nil {
 		if manageResp.StatusCode == 200 {
-			// Read body and save to file for debugging
 			body, _ := io.ReadAll(manageResp.Body)
 			log.Printf("[Profile] /account/manage response length: %d", len(body))
-			
-			// Save response to file for analysis
-			os.WriteFile("account_manage_response.json", body, 0644)
-			log.Printf("[Profile] Response saved to account_manage_response.json")
 
 			var manageData AccountManageResponse
 			if json.Unmarshal(body, &manageData) == nil {

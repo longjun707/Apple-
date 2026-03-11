@@ -33,19 +33,38 @@ function App() {
 
   // Validate session on mount — if persisted auth exists, verify it's still valid
   useEffect(() => {
-    if (authState !== 'authenticated') {
-      setSessionChecked(true)
-      return
-    }
-    api.adminInfo().then((res) => {
-      if (!res.success) {
-        clearSession()
-        logout()
-      } else if (res.data) {
-        setAdmin(res.data)
+    // 只在组件挂载时执行一次，使用 ref 避免重复执行
+    let isMounted = true
+    
+    const validateSession = async () => {
+      if (authState !== 'authenticated') {
+        setSessionChecked(true)
+        return
       }
-    }).finally(() => setSessionChecked(true))
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+      
+      try {
+        const res = await api.adminInfo()
+        if (!isMounted) return
+        
+        if (!res.success) {
+          clearSession()
+          logout()
+        } else if (res.data) {
+          setAdmin(res.data)
+        }
+      } finally {
+        if (isMounted) {
+          setSessionChecked(true)
+        }
+      }
+    }
+    
+    validateSession()
+    
+    return () => {
+      isMounted = false
+    }
+  }, [authState, logout, setAdmin])
 
   const handleLogout = useCallback(async () => {
     try {

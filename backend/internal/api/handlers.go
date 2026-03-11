@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -163,8 +164,10 @@ func (s *Server) Health(c *gin.Context) {
 func generateSessionID() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		// Fallback should never happen, but just in case
-		panic("crypto/rand failed: " + err.Error())
+		// Fallback to time-based ID if crypto/rand fails (extremely rare)
+		// This is less secure but better than crashing the server
+		fallback := fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().UnixNano()>>16)
+		return hex.EncodeToString([]byte(fallback))[:64]
 	}
 	return hex.EncodeToString(b)
 }

@@ -48,11 +48,11 @@ export default function EmailsPage() {
     try {
       const emails = list.map((e) => e.emailAddress).join('\n')
       await navigator.clipboard.writeText(emails)
-      toast.success(`已复制 ${list.length} 个邮箱`)
+      toast.success(`已复制当前页 ${list.length} 个邮箱（共 ${total} 个）`)
     } catch {
       toast.error('复制失败')
     }
-  }, [list])
+  }, [list, total])
 
   const handleExport = useCallback(() => {
     if (!list.length) return
@@ -69,11 +69,11 @@ export default function EmailsPage() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `hme-all-${new Date().toISOString().slice(0, 10)}.csv`
+    a.download = `hme-page${page}-${new Date().toISOString().slice(0, 10)}.csv`
     a.click()
     URL.revokeObjectURL(url)
-    toast.success('已导出 CSV 文件')
-  }, [list])
+    toast.success(`已导出当前页 ${list.length} 条记录（共 ${total} 条）`)
+  }, [list, total, page])
 
   return (
     <div className="animate-fade-in">

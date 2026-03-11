@@ -35,7 +35,13 @@ export default function TwoFAModal({ open, accountId, phoneNumbers, onClose, onS
   }, [open, phoneNumbers])
 
   const verifyMutation = useMutation({
-    mutationFn: () => api.verify2FAForAccount(accountId!, code, method, selectedPhoneId),
+    // 只有 SMS 模式才需要 phoneId，设备验证时不传递
+    mutationFn: () => api.verify2FAForAccount(
+      accountId!,
+      code,
+      method,
+      method === 'sms' ? selectedPhoneId : undefined
+    ),
     onSuccess: (res) => {
       if (res.success) {
         toast.success('2FA 验证成功')

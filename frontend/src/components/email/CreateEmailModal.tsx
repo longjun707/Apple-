@@ -19,13 +19,13 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
   const [createdEmail, setCreatedEmail] = useState<HMEEmail | null>(null)
   const queryClient = useQueryClient()
 
-  // Fetch available forward-to emails
+  // Fetch forward email options from Apple's actual forward email API
   const { data: forwardEmails, isLoading: loadingForward } = useQuery({
-    queryKey: ['forward-emails', accountId],
+    queryKey: ['forward-email-options', accountId],
     queryFn: async () => {
-      const res = await api.getAccountForwardEmails(accountId)
+      const res = await api.getForwardEmailOptions(accountId)
       if (!res.success) throw new Error(res.error)
-      return res.data || []
+      return res.data?.forwardToOptions?.availableEmails?.map(e => e.address) || []
     },
     enabled: open,
     staleTime: 60_000,

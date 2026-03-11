@@ -70,12 +70,14 @@ func escapeLike(s string) string {
 }
 
 // truncateError truncates error message to fit database column (max 500 chars)
+// Uses rune-safe truncation to avoid breaking multi-byte UTF-8 characters
 func truncateError(s string) string {
 	const maxLen = 500
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
 
 // saveAppleSession persists Apple auth session (tokens + cookies) to database
@@ -110,14 +112,13 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 		if profileResp.Country != "" {
 			updates["country"] = profileResp.Country
 		}
-		if len(profileResp.AlternateEmails) > 0 {
-			emailsJSON, _ := json.Marshal(profileResp.AlternateEmails)
-			updates["alternate_emails"] = string(emailsJSON)
-		}
-		// Save phone numbers from security section
+	// Always update alternate_emails (clear stale data when all emails are removed)
+		emailsJSON, _ := json.Marshal(profileResp.AlternateEmails)
+		updates["alternate_emails"] = string(emailsJSON)
+		// Always update phone_numbers (clear stale data when all numbers are removed)
+		phonesJSON, _ := json.Marshal(profileResp.PhoneNumbers)
+		updates["phone_numbers"] = string(phonesJSON)
 		if len(profileResp.PhoneNumbers) > 0 {
-			phonesJSON, _ := json.Marshal(profileResp.PhoneNumbers)
-			updates["phone_numbers"] = string(phonesJSON)
 			log.Printf("[Profile] Saving %d phone numbers for account %d", len(profileResp.PhoneNumbers), accountID)
 		}
 		updates["trusted_device_count"] = profileResp.TrustedDeviceCount
@@ -173,7 +174,7 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 const maxSessionAge = 7 * 24 * time.Hour
 
 // getProxyURL gets the proxy URL from settings
-// If it's an extraction API (contains "extract" or similar), fetch the real proxy first
+// If it's an extraction API URL, fetch the real proxy first
 func getProxyURL() string {
 	if store.DB == nil {
 		return ""
@@ -184,8 +185,11 @@ func getProxyURL() string {
 		return ""
 	}
 	
-	// Check if this is an extraction API (common patterns: extract, api, core-extract)
-	if strings.Contains(proxyConfig, "extract") || strings.Contains(proxyConfig, "/api/") {
+	// Check if this is an extraction API (must contain "extract" in path, not just any /api/ URL)
+	// Direct proxy URLs typically start with http:// or socks:// followed by host:port
+	isExtractionAPI := strings.Contains(proxyConfig, "extract") ||
+		(strings.Contains(proxyConfig, "/api/") && !strings.HasPrefix(proxyConfig, "http://") && !strings.HasPrefix(proxyConfig, "socks"))
+	if isExtractionAPI {
 		// It's an extraction API, fetch the real proxy
 		log.Printf("[Proxy] Fetching proxy from API: %s", proxyConfig)
 		
@@ -352,7 +356,8 @@ func (s *Server) ListAccounts(c *gin.Context) {
 	}
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 	pageSize = clampPageSize(pageSize)
-	search := escapeLike(c.Query("search"))
+	// Note: escapeLike is called inside AccountRepo.List(), don't escape here
+	search := c.Query("search")
 
 	accounts, total, err := store.NewAccountRepo().List(page, pageSize, search)
 	if err != nil {
@@ -468,6 +473,13 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 		return
 	}
 
+	// Check if account exists
+	var account store.Account
+	if err := store.DB.First(&account, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, APIResponse{Success: false, Error: "账户不存在"})
+		return
+	}
+
 	// Check for duplicate Apple ID (exclude current account)
 	var existing store.Account
 	if err := store.DB.Where("apple_id = ? AND id != ?", req.AppleID, id).First(&existing).Error; err == nil {
@@ -483,7 +495,7 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 		updates["password"] = store.EncryptPassword(req.Password)
 	}
 
-	if err := store.DB.Model(&store.Account{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+	if err := store.DB.Model(&account).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
@@ -493,6 +505,11 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 
 // DeleteAccount deletes an Apple account and all related data
 func (s *Server) DeleteAccount(c *gin.Context) {
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	if id == 0 {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
@@ -706,7 +723,9 @@ func (s *Server) RequestSMSForAccount(c *gin.Context) {
 	var req struct {
 		PhoneID int `json:"phoneId"`
 	}
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("[RequestSMS] JSON bind error: %v", err)
+	}
 	
 	log.Printf("[RequestSMS] phoneId=%d", req.PhoneID)
 	
@@ -799,9 +818,9 @@ func StartPeriodicSessionRefresh() {
 	go func() {
 		for {
 			// Random delay: 3-5 minutes (180-300 seconds)
-			delaySec := 180 + time.Duration(time.Now().UnixNano()%120)
-			log.Printf("[Session] Next refresh in %d seconds", delaySec)
-			time.Sleep(delaySec * time.Second)
+			delaySeconds := 180 + int(time.Now().UnixNano()%120)
+			log.Printf("[Session] Next refresh in %d seconds", delaySeconds)
+			time.Sleep(time.Duration(delaySeconds) * time.Second)
 
 			log.Printf("[Session] Periodic session refresh triggered")
 			RefreshAllSessions()
@@ -935,9 +954,10 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		autoHMEStatus.mu.Unlock()
 	}()
 
-	// Find all accounts with valid sessions (status=1 means logged in)
+	// Find all accounts with valid sessions (status=1, session not expired)
+	minSessionTime := time.Now().Add(-maxSessionAge)
 	var accounts []store.Account
-	if err := store.DB.Where("session_token != '' AND session_token IS NOT NULL AND status = 1").Find(&accounts).Error; err != nil {
+	if err := store.DB.Where("session_token != '' AND session_token IS NOT NULL AND status = 1 AND session_saved_at IS NOT NULL AND session_saved_at > ?", minSessionTime).Find(&accounts).Error; err != nil {
 		addAutoHMELog("error", fmt.Sprintf("查询账户失败: %v", err))
 		return
 	}
@@ -1183,11 +1203,13 @@ func (s *Server) GetAccountHME(c *gin.Context) {
 	}
 
 	// Try active session or restore from DB
+	var appleAPIError string
 	if ensureAppleSession(session, uint(id)) {
 		emails, err := session.HME.ListEmails()
 		if err != nil {
 			errStr := err.Error()
 			log.Printf("[GetAccountHME] Apple API error: %v", err)
+			appleAPIError = errStr
 
 			// If 401 error, session is invalid - clear it
 			if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
@@ -1219,16 +1241,25 @@ func (s *Server) GetAccountHME(c *gin.Context) {
 	for i, r := range records {
 		emails[i] = hmeRecordToEmail(r)
 	}
+	// Log warning if Apple API failed but we have cached data
+	if appleAPIError != "" {
+		log.Printf("[GetAccountHME] Returning cached data for account %d (Apple API error: %s)", id, appleAPIError)
+	}
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: emails})
 }
 
-// syncHMEToDB syncs Apple HME emails to the local database (upsert)
+// syncHMEToDB syncs Apple HME emails to the local database (upsert + delete stale)
 func syncHMEToDB(accountID uint, emails []apple.HMEEmail) {
-	if store.DB == nil || len(emails) == 0 {
+	if store.DB == nil {
 		return
 	}
 	hmeRepo := store.NewHMERepo()
+
+	// Build a set of Apple-side HME IDs for stale detection
+	appleIDs := make(map[string]bool, len(emails))
+
 	for _, e := range emails {
+		appleIDs[e.ID] = true
 		existing, _ := hmeRepo.FindByHMEID(e.ID)
 		if existing != nil {
 			if err := store.DB.Model(existing).Updates(map[string]interface{}{
@@ -1254,6 +1285,21 @@ func syncHMEToDB(accountID uint, emails []apple.HMEEmail) {
 			}
 		}
 	}
+
+	// Remove DB records that no longer exist on Apple side
+	dbRecords, err := hmeRepo.FindByAccountID(accountID)
+	if err == nil {
+		for _, r := range dbRecords {
+			if r.HMEID != "" && !appleIDs[r.HMEID] {
+				if err := hmeRepo.DeleteByHMEID(r.HMEID); err != nil {
+					log.Printf("[syncHME] Failed to delete stale HME %s: %v", r.HMEID, err)
+				} else {
+					log.Printf("[syncHME] Removed stale HME %s (%s) for account %d", r.HMEID, r.EmailAddress, accountID)
+				}
+			}
+		}
+	}
+
 	// Update count
 	count, _ := hmeRepo.Count(accountID)
 	store.NewAccountRepo().UpdateHMECount(accountID, int(count))
@@ -1275,7 +1321,9 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 	}
 
 	var req CreateHMERequest
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("[CreateAccountHME] JSON bind error (using defaults): %v", err)
+	}
 
 	hme, err := session.HME.CreateEmail(req.Label, req.Note, req.ForwardToEmail)
 	if err != nil {
@@ -1288,7 +1336,7 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 
 	// Save to database
 	hmeRepo := store.NewHMERepo()
-	hmeRepo.Create(&store.HMERecord{
+	if err := hmeRepo.Create(&store.HMERecord{
 		AccountID:      uint(id),
 		HMEID:          hme.ID,
 		EmailAddress:   hme.EmailAddress,
@@ -1296,7 +1344,9 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 		Note:           hme.Note,
 		ForwardToEmail: hme.ForwardToEmail,
 		Active:         hme.Active,
-	})
+	}); err != nil {
+		log.Printf("[CreateAccountHME] Failed to save HME to database: %v", err)
+	}
 
 	// Update count
 	count, _ := hmeRepo.Count(uint(id))
@@ -1329,7 +1379,9 @@ func (s *Server) DeleteAccountHME(c *gin.Context) {
 
 	// Delete from database
 	hmeRepo := store.NewHMERepo()
-	hmeRepo.DeleteByHMEID(hmeId)
+	if err := hmeRepo.DeleteByHMEID(hmeId); err != nil {
+		log.Printf("[DeleteAccountHME] Failed to delete HME from database: %v", err)
+	}
 
 	// Update count
 	count, _ := hmeRepo.Count(uint(accountID))
@@ -1437,6 +1489,11 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 
 // AdminChangePassword changes admin password
 func (s *Server) AdminChangePassword(c *gin.Context) {
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
 	session := c.MustGet("session").(*SessionState)
 
 	var req struct {

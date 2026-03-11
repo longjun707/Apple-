@@ -5,6 +5,7 @@ import { toast } from '@/stores/toastStore'
 import {
   Plus, Trash2, LogIn, Mail, RefreshCw, Search,
   Edit, Loader2, Users, Shield, Smartphone, Eye, Phone, Upload,
+  CheckCircle2, AlertCircle, Clock, X,
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog'
@@ -12,6 +13,8 @@ import AccountFormModal from '@/components/account/AccountFormModal'
 import TwoFAModal from '@/components/account/TwoFAModal'
 import AccountHMEPanel from '@/components/account/AccountHMEPanel'
 import BatchImportModal from '@/components/account/BatchImportModal'
+import Pagination from '@/components/ui/Pagination'
+import { cn } from '@/lib/cn'
 
 export default function AccountsPage() {
   const queryClient = useQueryClient()
@@ -36,6 +39,18 @@ export default function AccountsPage() {
   const total = data?.data?.total || 0
   const pageSize = data?.data?.pageSize || 20
   const totalPages = Math.ceil(total / pageSize)
+
+  // 全局统计数据（不受分页/搜索影响）
+  const { data: statsData } = useQuery({
+    queryKey: ['admin-stats'],
+    queryFn: () => api.getStats(),
+  })
+  const stats = {
+    totalAccounts: statsData?.data?.totalAccounts ?? 0,
+    activeAccounts: statsData?.data?.activeAccounts ?? 0,
+    errorAccounts: statsData?.data?.errorAccounts ?? 0,
+    totalHME: statsData?.data?.totalHME ?? 0,
+  }
 
   // ---- Mutations ----
   const loginMutation = useMutation({
@@ -88,25 +103,89 @@ export default function AccountsPage() {
     return <AccountHMEPanel account={selectedAccount} onBack={() => setSelectedAccount(null)} />
   }
 
+  // 解析账户的电话号码
+  const parsePhones = (phoneNumbers: string | undefined) => {
+    try {
+      const phones = phoneNumbers ? JSON.parse(phoneNumbers) : []
+      return phones.map((p: { fullNumberWithCountryPrefix?: string; numberWithDialCode?: string }) =>
+        p.fullNumberWithCountryPrefix || p.numberWithDialCode || ''
+      ).filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+
+  // 解析备用邮箱
+  const parseAlternateEmails = (alternateEmails: string | string[] | undefined) => {
+    try {
+      if (typeof alternateEmails === 'string') {
+        return alternateEmails ? JSON.parse(alternateEmails) : []
+      }
+      return alternateEmails || []
+    } catch {
+      return []
+    }
+  }
+
   // ---- Account list view ----
   return (
     <div className="animate-fade-in">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900 tracking-tight">Apple 账户管理</h2>
-          <p className="text-sm text-gray-500 mt-1">共 <span className="font-medium text-gray-700 tabular-nums">{total}</span> 个账户</p>
+          <h2 className="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight">Apple 账户管理</h2>
+          <p className="text-sm text-gray-500 mt-1">管理你的 Apple ID 账户和隐藏邮箱</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button onClick={() => refetch()} variant="outline" size="sm" icon={<RefreshCw className="w-4 h-4" />}>
-            刷新
+            <span className="hidden sm:inline">刷新</span>
           </Button>
           <Button onClick={() => setBatchImportOpen(true)} variant="outline" size="sm" icon={<Upload className="w-4 h-4" />}>
-            批量导入
+            <span className="hidden sm:inline">批量导入</span>
           </Button>
           <Button onClick={() => setFormAccount(null)} size="sm" icon={<Plus className="w-4 h-4" />}>
-            添加账户
+            <span className="hidden xs:inline">添加</span>账户
           </Button>
+        </div>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 mb-6">
+        <div className="bg-white rounded-xl border border-gray-100 p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
+          <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+            <Users className="w-4 h-4 sm:w-5 sm:h-5 text-blue-600" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-lg sm:text-2xl font-bold text-gray-900 tabular-nums">{stats.totalAccounts}</p>
+            <p className="text-[10px] sm:text-xs text-gray-500 truncate">账户总数</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-100 p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
+          <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg bg-green-50 flex items-center justify-center flex-shrink-0">
+            <CheckCircle2 className="w-4 h-4 sm:w-5 sm:h-5 text-green-600" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-lg sm:text-2xl font-bold text-gray-900 tabular-nums">{stats.activeAccounts}</p>
+            <p className="text-[10px] sm:text-xs text-gray-500 truncate">正常</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-100 p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
+          <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg bg-red-50 flex items-center justify-center flex-shrink-0">
+            <AlertCircle className="w-4 h-4 sm:w-5 sm:h-5 text-red-500" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-lg sm:text-2xl font-bold text-gray-900 tabular-nums">{stats.errorAccounts}</p>
+            <p className="text-[10px] sm:text-xs text-gray-500 truncate">异常</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-100 p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
+          <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg bg-purple-50 flex items-center justify-center flex-shrink-0">
+            <Mail className="w-4 h-4 sm:w-5 sm:h-5 text-purple-600" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-lg sm:text-2xl font-bold text-gray-900 tabular-nums">{stats.totalHME}</p>
+            <p className="text-[10px] sm:text-xs text-gray-500 truncate">HME 邮箱</p>
+          </div>
         </div>
       </div>
 
@@ -119,16 +198,56 @@ export default function AccountsPage() {
         }}
         className="mb-5"
       >
-        <div className="relative max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-          <input
-            type="text"
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="搜索 Apple ID、姓名或备注..."
-            className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-apple-blue/20 focus:border-apple-blue transition-all placeholder:text-gray-400"
-          />
+        <div className="flex gap-2">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="搜索 Apple ID、姓名或备注..."
+              className="w-full pl-9 pr-9 py-2 sm:py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-apple-blue/20 focus:border-apple-blue transition-all placeholder:text-gray-400"
+            />
+            {/* 清除输入按钮 */}
+            {searchInput && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchInput('')
+                  setSearch('')
+                  setPage(1)
+                }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          <Button type="submit" size="sm" icon={<Search className="w-4 h-4" />}>
+            <span className="hidden sm:inline">搜索</span>
+          </Button>
         </div>
+        {/* 显示当前搜索条件 */}
+        {search && (
+          <div className="flex flex-wrap items-center gap-2 mt-3">
+            <span className="text-xs sm:text-sm text-gray-500">搜索：</span>
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 sm:px-2.5 sm:py-1 bg-blue-50 text-blue-700 text-xs sm:text-sm rounded-lg">
+              "{search}"
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchInput('')
+                  setSearch('')
+                  setPage(1)
+                }}
+                className="hover:text-blue-900"
+              >
+                <X className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+              </button>
+            </span>
+            <span className="text-xs sm:text-sm text-gray-400">{total} 个结果</span>
+          </div>
+        )}
       </form>
 
       {/* Loading */}
@@ -140,206 +259,201 @@ export default function AccountsPage() {
 
       {/* Empty */}
       {!isLoading && accounts.length === 0 && (
-        <div className="text-center py-20">
-          <Mail className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-gray-500 font-medium">暂无账户</p>
-          <p className="text-sm text-gray-400 mt-1">点击「添加账户」开始</p>
+        <div className="text-center py-20 bg-white rounded-2xl border border-gray-100">
+          <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <Mail className="w-8 h-8 text-gray-300" />
+          </div>
+          <p className="text-gray-600 font-medium">暂无账户</p>
+          <p className="text-sm text-gray-400 mt-1 mb-4">点击上方按钮添加你的第一个 Apple ID</p>
+          <Button onClick={() => setFormAccount(null)} size="sm" icon={<Plus className="w-4 h-4" />}>
+            添加账户
+          </Button>
         </div>
       )}
 
-      {/* Account table */}
+      {/* Account Cards */}
       {!isLoading && accounts.length > 0 && (
         <>
-          <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 overflow-x-auto">
-            <table className="min-w-full table-fixed">
-              <thead>
-                <tr className="border-b border-gray-100 bg-gray-50/50">
-                  <th className="w-[220px] px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Apple ID / 姓名</th>
-                  <th className="w-[120px] px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden lg:table-cell">个人信息</th>
-                  <th className="w-[80px] px-4 py-3 text-center text-[11px] font-semibold text-gray-500 uppercase tracking-wider">状态</th>
-                  <th className="w-[100px] px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">安全</th>
-                  <th className="w-[60px] px-4 py-3 text-center text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">HME</th>
-                  <th className="w-[110px] px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">家人共享</th>
-                  <th className="w-[180px] px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider hidden xl:table-cell">备注 / 错误</th>
-                  <th className="w-[140px] px-4 py-3 text-center text-[11px] font-semibold text-gray-500 uppercase tracking-wider">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {accounts.map((account) => (
-                  <tr key={account.id} className="hover:bg-blue-50/30 transition-colors">
-                    <td className="px-4 py-3">
-                      <button
-                        onClick={() => setSelectedAccount(account)}
-                        className="flex items-center gap-2.5 text-left hover:bg-gray-50 rounded-lg -m-1 p-1 transition-colors w-full"
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
+            {accounts.map((account) => {
+              const phones = parsePhones(account.phoneNumbers)
+              const altEmails = parseAlternateEmails(account.alternateEmails)
+              const isLoggedIn = !!account.sessionSavedAt
+              const isNormal = account.status === 1
+
+              return (
+                <div
+                  key={account.id}
+                  className={cn(
+                    'bg-white rounded-2xl border p-4 transition-all hover:shadow-lg hover:border-gray-200 group',
+                    !isNormal ? 'border-red-100 bg-red-50/30' : 'border-gray-100'
+                  )}
+                >
+                  {/* Card Header */}
+                  <div className="flex items-start justify-between mb-3">
+                    <button
+                      onClick={() => setSelectedAccount(account)}
+                      className="flex items-center gap-3 text-left flex-1 min-w-0 hover:opacity-80 transition-opacity"
+                    >
+                      <div className={cn(
+                        'w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0',
+                        isLoggedIn ? 'bg-gradient-to-br from-green-400 to-emerald-500' : 'bg-gradient-to-br from-gray-200 to-gray-300'
+                      )}>
+                        <Mail className="w-5 h-5 text-white" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-gray-900 truncate">{account.appleId}</div>
+                        {account.fullName && (
+                          <div className="text-xs text-gray-500 truncate">{account.fullName}</div>
+                        )}
+                      </div>
+                    </button>
+                    {/* Status Badge */}
+                    <div className={cn(
+                      'px-2 py-1 rounded-lg text-[10px] font-semibold flex-shrink-0',
+                      isNormal ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
+                    )}>
+                      {isNormal ? '正常' : '异常'}
+                    </div>
+                  </div>
+
+                  {/* Info Grid */}
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    {/* Login Status */}
+                    <div className="bg-gray-50 rounded-lg p-2 text-center">
+                      <div className={cn(
+                        'text-xs font-medium',
+                        isLoggedIn ? 'text-green-600' : 'text-orange-500'
+                      )}>
+                        {isLoggedIn ? '✓ 已登录' : '⚠ 未登录'}
+                      </div>
+                      {isLoggedIn && account.sessionSavedAt && (
+                        <div className="text-[10px] text-gray-400 mt-0.5" title={new Date(account.sessionSavedAt).toLocaleString()}>
+                          <Clock className="w-2.5 h-2.5 inline mr-0.5" />
+                          {new Date(account.sessionSavedAt).toLocaleDateString()}
+                        </div>
+                      )}
+                    </div>
+                    {/* HME Count */}
+                    <div className="bg-gray-50 rounded-lg p-2 text-center">
+                      <div className="text-sm font-bold text-gray-900 tabular-nums">{account.hmeCount}</div>
+                      <div className="text-[10px] text-gray-400">HME</div>
+                    </div>
+                    {/* Security */}
+                    <div className="bg-gray-50 rounded-lg p-2 text-center">
+                      <div className="flex items-center justify-center gap-1">
+                        <Shield className={cn('w-3.5 h-3.5', account.twoFactorEnabled ? 'text-green-500' : 'text-gray-300')} />
+                        <span className={cn('text-xs font-medium', account.twoFactorEnabled ? 'text-green-600' : 'text-gray-400')}>
+                          {account.twoFactorEnabled ? '2FA' : '无'}
+                        </span>
+                      </div>
+                      {account.trustedDeviceCount !== undefined && account.trustedDeviceCount > 0 && (
+                        <div className="text-[10px] text-gray-400 mt-0.5">
+                          <Smartphone className="w-2.5 h-2.5 inline mr-0.5" />
+                          {account.trustedDeviceCount} 设备
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Extra Info */}
+                  <div className="space-y-1.5 mb-3 text-xs">
+                    {/* Phone */}
+                    {phones.length > 0 && (
+                      <div className="flex items-center gap-1.5 text-gray-500">
+                        <Phone className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />
+                        <span className="truncate" title={phones.join(', ')}>{phones[0]}</span>
+                        {phones.length > 1 && <span className="text-gray-400">+{phones.length - 1}</span>}
+                      </div>
+                    )}
+                    {/* Family */}
+                    {account.familyMemberCount != null && account.familyMemberCount > 0 && (
+                      <div className="flex items-center gap-1.5 text-gray-500">
+                        <Users className={cn(
+                          'w-3.5 h-3.5 flex-shrink-0',
+                          account.isFamilyOrganizer ? 'text-purple-500' : 'text-gray-400'
+                        )} />
+                        <span>
+                          家人共享 {account.familyMemberCount} 人
+                          {account.isFamilyOrganizer && <span className="text-purple-600 ml-1">(组织者)</span>}
+                        </span>
+                      </div>
+                    )}
+                    {/* Alternate Emails */}
+                    {altEmails.length > 0 && (
+                      <div className="flex items-center gap-1.5 text-gray-500" title={altEmails.join(', ')}>
+                        <Mail className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+                        <span>{altEmails.length + 1} 个邮箱地址</span>
+                      </div>
+                    )}
+                    {/* Remark */}
+                    {account.remark && (
+                      <div className="text-gray-400 truncate" title={account.remark}>
+                        📝 {account.remark}
+                      </div>
+                    )}
+                    {/* Error */}
+                    {account.lastError && (
+                      <div className="text-red-500 truncate" title={account.lastError}>
+                        ⚠️ {account.lastError}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center justify-between pt-3 border-t border-gray-100 gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setSelectedAccount(account)}
+                      icon={<Eye className="w-3.5 h-3.5" />}
+                      className="flex-shrink-0"
+                    >
+                      <span className="hidden xs:inline">详情</span>
+                    </Button>
+                    <div className="flex items-center gap-0.5 sm:gap-1 flex-shrink-0">
+                      <Button
+                        size="sm"
+                        variant={isLoggedIn ? 'ghost' : 'primary'}
+                        title="登录 Apple 账户"
+                        onClick={() => loginMutation.mutate(account.id)}
+                        loading={loginMutation.isPending && loginMutation.variables === account.id}
+                        icon={<LogIn className="w-3.5 h-3.5" />}
                       >
-                        <div className="w-8 h-8 bg-gradient-to-br from-gray-100 to-gray-50 rounded-lg flex items-center justify-center flex-shrink-0 border border-gray-100">
-                          <Mail className="w-3.5 h-3.5 text-gray-400" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[13px] font-medium text-gray-900 truncate">{account.appleId}</div>
-                          {account.fullName && <div className="text-[11px] text-gray-400 truncate">{account.fullName}</div>}
-                          {/* Phone Numbers */}
-                          {(() => {
-                            try {
-                              const phones = account.phoneNumbers ? JSON.parse(account.phoneNumbers) : [];
-                              if (phones.length === 0) return null;
-                              const getPhone = (p: { fullNumberWithCountryPrefix?: string; numberWithDialCode?: string }) => 
-                                p.fullNumberWithCountryPrefix || p.numberWithDialCode || '';
-                              return (
-                                <div className="flex items-center gap-1 mt-0.5" title={phones.map(getPhone).join('\n')}>
-                                  <Phone className="w-2.5 h-2.5 text-green-500" />
-                                  <span className="text-[10px] text-green-600 truncate">
-                                    {getPhone(phones[0])}
-                                  </span>
-                                </div>
-                              );
-                            } catch {
-                              return null;
-                            }
-                          })()}
-                        </div>
-                      </button>
-                    </td>
-                    <td className="px-4 py-3 hidden lg:table-cell">
-                      <div className="text-[11px] space-y-0.5">
-                        {account.birthday && <div className="text-gray-500">🎂 {account.birthday}</div>}
-                        {account.country && <div className="text-gray-400">🌏 {account.country === 'CHN' ? '中国' : account.country}</div>}
-                        {(() => {
-                          try {
-                            const emails: string[] = typeof account.alternateEmails === 'string' 
-                              ? (account.alternateEmails ? JSON.parse(account.alternateEmails) : []) 
-                              : (account.alternateEmails || []);
-                            if (emails.length === 0) return null;
-                            const totalEmails = 1 + emails.length;
-                            return (
-                              <div 
-                                className="text-blue-500 cursor-help" 
-                                title={`主要: ${account.appleId}\n备用: ${emails.join('\n')}`}
-                              >
-                                📧 {totalEmails} 个邮箱
-                              </div>
-                            );
-                          } catch {
-                            return null;
-                          }
-                        })()}
-                        {!account.birthday && !account.country && !account.alternateEmails && <span className="text-gray-300">—</span>}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {account.status === 1 ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-50 text-emerald-700">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> 正常
-                        </span>
-                      ) : (
-                        <span
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-red-50 text-red-600 cursor-help"
-                          title={account.lastError}
-                        >
-                          <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> 异常
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 hidden sm:table-cell">
-                      <div className="flex flex-col gap-0.5">
-                        {account.sessionSavedAt ? (
-                          <span className="text-[10px] text-emerald-600 font-medium" title={`会话保存于 ${new Date(account.sessionSavedAt).toLocaleString()}`}>
-                            ✓ 已登录
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-orange-500 font-medium">
-                            ⚠ 未登录
-                          </span>
-                        )}
-                        <div className="flex items-center gap-0.5">
-                          <Shield className={`w-3 h-3 ${account.twoFactorEnabled ? 'text-emerald-500' : 'text-gray-300'}`} />
-                          <span className={`text-[10px] ${account.twoFactorEnabled ? 'text-emerald-600' : 'text-gray-400'}`}>
-                            {account.twoFactorEnabled ? '2FA' : '无2FA'}
-                          </span>
-                        </div>
-                        {account.trustedDeviceCount !== undefined && account.trustedDeviceCount > 0 && (
-                          <div className="flex items-center gap-0.5">
-                            <Smartphone className="w-3 h-3 text-blue-400" />
-                            <span className="text-[10px] text-gray-500">{account.trustedDeviceCount}设备</span>
-                          </div>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-center text-[13px] text-gray-600 tabular-nums font-medium hidden sm:table-cell">
-                      {account.hmeCount}
-                    </td>
-                    <td className="px-4 py-3 hidden md:table-cell">
-                      {account.familyMemberCount && account.familyMemberCount > 0 ? (
-                        <div className="flex items-center gap-1">
-                          <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                            account.isFamilyOrganizer
-                              ? 'bg-purple-50 text-purple-700'
-                              : account.familyRole === 'parent'
-                              ? 'bg-orange-50 text-orange-700'
-                              : 'bg-gray-50 text-gray-600'
-                          }`}>
-                            <Users className="w-2.5 h-2.5" />
-                            {account.familyMemberCount}
-                          </span>
-                          <span className="text-[10px] text-gray-400">
-                            {account.isFamilyOrganizer ? '组织者' : account.familyRole === 'parent' ? '家长' : account.familyRole === 'child' ? '儿童' : '成员'}
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-gray-300 text-[11px]">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 hidden xl:table-cell">
-                      <div className="text-[11px] space-y-0.5">
-                        {account.remark && <div className="text-gray-500 truncate" title={account.remark}>{account.remark}</div>}
-                        {account.lastError && <div className="text-red-500 truncate" title={account.lastError}>⚠ {account.lastError}</div>}
-                        {!account.remark && !account.lastError && <span className="text-gray-300">—</span>}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex justify-center gap-0.5">
-                        <Button
-                          size="sm" variant="ghost" title="查看详情"
-                          onClick={() => setSelectedAccount(account)}
-                          icon={<Eye className="w-3.5 h-3.5" />}
-                        />
-                        <Button
-                          size="sm" variant="ghost" title="登录 Apple 账户"
-                          onClick={() => loginMutation.mutate(account.id)}
-                          loading={loginMutation.isPending && loginMutation.variables === account.id}
-                          icon={<LogIn className="w-3.5 h-3.5" />}
-                        />
-                        <Button
-                          size="sm" variant="ghost" title="编辑"
-                          onClick={() => setFormAccount(account)}
-                          icon={<Edit className="w-3.5 h-3.5" />}
-                        />
-                        <Button
-                          size="sm" variant="ghost" title="删除"
-                          className="hover:!text-red-500 hover:!bg-red-50"
-                          onClick={() => setDeleteTarget(account)}
-                          icon={<Trash2 className="w-3.5 h-3.5" />}
-                        />
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                        <span className="hidden sm:inline">{isLoggedIn ? '重登' : '登录'}</span>
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="编辑"
+                        onClick={() => setFormAccount(account)}
+                        icon={<Edit className="w-3.5 h-3.5" />}
+                      />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="删除"
+                        className="hover:!text-red-500 hover:!bg-red-50"
+                        onClick={() => setDeleteTarget(account)}
+                        icon={<Trash2 className="w-3.5 h-3.5" />}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
 
           {/* Pagination */}
           {totalPages > 1 && (
-            <div className="flex justify-center items-center gap-4 mt-6">
-              <Button size="sm" variant="outline" disabled={page === 1} onClick={() => setPage((p) => p - 1)}>
-                上一页
-              </Button>
-              <span className="text-[13px] text-gray-500 tabular-nums font-medium">
-                {page} <span className="text-gray-300 mx-0.5">/</span> {totalPages}
-              </span>
-              <Button size="sm" variant="outline" disabled={page === totalPages} onClick={() => setPage((p) => p + 1)}>
-                下一页
-              </Button>
+            <div className="mt-6">
+              <Pagination
+                currentPage={page}
+                totalPages={totalPages}
+                totalItems={total}
+                pageSize={pageSize}
+                onPageChange={setPage}
+              />
             </div>
           )}
         </>

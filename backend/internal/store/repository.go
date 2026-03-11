@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -82,6 +83,14 @@ func (r *AccountRepo) UpdateHMECount(accountID uint, count int) error {
 	return DB.Model(&Account{}).Where("id = ?", accountID).Update("hme_count", count).Error
 }
 
+// escapeLike escapes SQL LIKE wildcards for safe searching
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
+}
+
 // List returns accounts with optional search filter
 func (r *AccountRepo) List(page, pageSize int, search string) ([]Account, int64, error) {
 	var accounts []Account
@@ -89,8 +98,8 @@ func (r *AccountRepo) List(page, pageSize int, search string) ([]Account, int64,
 
 	query := DB.Model(&Account{})
 	if search != "" {
-		like := "%" + search + "%"
-		query = query.Where("apple_id LIKE ? OR full_name LIKE ? OR remark LIKE ?", like, like, like)
+		like := "%" + escapeLike(search) + "%"
+		query = query.Where("apple_id LIKE ? ESCAPE '\\' OR full_name LIKE ? ESCAPE '\\' OR remark LIKE ? ESCAPE '\\'", like, like, like)
 	}
 
 	query.Count(&total)
