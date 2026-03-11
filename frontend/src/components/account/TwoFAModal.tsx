@@ -137,15 +137,9 @@ export default function TwoFAModal({ open, accountId, phoneNumbers, onClose, onS
                 </button>
               ))
             ) : (
-              <button
-                type="button"
-                onClick={() => smsMutation.mutate(1)}
-                disabled={smsMutation.isPending}
-                className="w-full flex items-center justify-center gap-2 py-2.5 text-sm text-apple-blue hover:text-blue-700 transition-colors disabled:opacity-50"
-              >
-                <MessageSquare className="w-4 h-4" />
-                {smsMutation.isPending ? '发送中...' : smsSent ? '重新发送短信验证码' : '使用短信验证码'}
-              </button>
+              <div className="text-center py-2.5 text-sm text-gray-400">
+                没有可用的电话号码
+              </div>
             )}
           </div>
         </form>

@@ -41,11 +41,13 @@ export default function AccountsPage() {
   const loginMutation = useMutation({
     mutationFn: (id: number) => api.loginAppleAccount(id),
     onSuccess: (res, id) => {
+      console.log('[Login] Response:', JSON.stringify(res, null, 2))
       if (!res.success) {
         toast.error(res.error || '登录失败')
         return
       }
       if (res.data?.requires2fa) {
+        console.log('[Login] phoneNumbers:', res.data?.phoneNumbers)
         setTwoFAAccountId(id)
         setTwoFAPhones(res.data?.phoneNumbers || [])
       } else {

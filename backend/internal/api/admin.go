@@ -622,8 +622,12 @@ func (s *Server) RequestSMSForAccount(c *gin.Context) {
 		PhoneID int `json:"phoneId"`
 	}
 	c.ShouldBindJSON(&req)
+	
+	log.Printf("[RequestSMS] phoneId=%d", req.PhoneID)
+	
 	if req.PhoneID == 0 {
-		req.PhoneID = 1
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请选择一个电话号码发送验证码"})
+		return
 	}
 
 	if err := session.Auth.RequestSMSCode(req.PhoneID); err != nil {
@@ -887,52 +891,45 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 			continue
 		}
 
-		// Create HME one by one (synchronously, no concurrency)
-		created := 0
-		consecutiveFailed := 0
-		failed := 0
-		batchTS := time.Now().Format("0102-1504")
-		for i := 0; i < countPerAccount; i++ {
-			autoHMEStatus.mu.Lock()
-			autoHMEStatus.CurrentProgress = i + 1
-			autoHMEStatus.mu.Unlock()
+		// Use BatchCreateEmails (same as manual batch creation) for consistency
+		autoHMEStatus.mu.Lock()
+		autoHMEStatus.CurrentProgress = 0
+		autoHMEStatus.mu.Unlock()
 
-			label := fmt.Sprintf("Auto-%s-%d", batchTS, i+1)
-			email, err := hme.CreateEmail(label, "", "")
-			if err != nil {
-				addAutoHMELog("error", fmt.Sprintf("账户 %s: 创建第 %d 个 HME 失败: %v", account.AppleID, i+1, err))
-				consecutiveFailed++
-				failed++
-				// If we get too many consecutive failures, stop for this account
-				if consecutiveFailed >= 3 {
-					addAutoHMELog("warning", fmt.Sprintf("账户 %s: 连续失败 %d 次，跳过剩余创建", account.AppleID, consecutiveFailed))
-					break
-				}
-				time.Sleep(2 * time.Second) // Wait longer on failure
-				continue
-			}
+		labelPrefix := fmt.Sprintf("Auto-%s", time.Now().Format("0102-1504"))
+		delayMs := 1000 // 1 second between creations, same as manual default
 
-			// Reset consecutive failure counter on success
-			consecutiveFailed = 0
+		results, errs := hme.BatchCreateEmails(countPerAccount, labelPrefix, delayMs, "")
 
-			// Save to database
+		// Update progress
+		autoHMEStatus.mu.Lock()
+		autoHMEStatus.CurrentProgress = len(results) + len(errs)
+		autoHMEStatus.mu.Unlock()
+
+		// Save to database
+		if len(results) > 0 {
 			hmeRepo := store.NewHMERepo()
-			hmeRepo.Create(&store.HMERecord{
-				AccountID:      account.ID,
-				HMEID:          email.ID,
-				EmailAddress:   email.EmailAddress,
-				Label:          email.Label,
-				Note:           email.Note,
-				ForwardToEmail: email.ForwardToEmail,
-				Active:         email.Active,
-			})
-
-			created++
-
-			// Delay between creations (1 second)
-			if i < countPerAccount-1 {
-				time.Sleep(1 * time.Second)
+			records := make([]store.HMERecord, len(results))
+			for i, email := range results {
+				records[i] = store.HMERecord{
+					AccountID:      account.ID,
+					HMEID:          email.ID,
+					EmailAddress:   email.EmailAddress,
+					Label:          email.Label,
+					Note:           email.Note,
+					ForwardToEmail: email.ForwardToEmail,
+					Active:         email.Active,
+				}
 			}
+			hmeRepo.BatchCreate(records)
+		}
+
+		created := len(results)
+		failed := len(errs)
+
+		// Log errors
+		for _, err := range errs {
+			addAutoHMELog("error", fmt.Sprintf("账户 %s: %v", account.AppleID, err))
 		}
 
 		// Update HME count for this account
@@ -1201,6 +1198,9 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 		return
 	}
 
+	// Save session after successful HME creation (new cookies may have been set)
+	go saveAppleSession(uint(id), session.Auth)
+
 	// Save to database
 	hmeRepo := store.NewHMERepo()
 	hmeRepo.Create(&store.HMERecord{
@@ -1441,6 +1441,9 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 	}
 
 	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail)
+
+	// Save session after batch creation (new cookies may have been set)
+	go saveAppleSession(uint(id), session.Auth)
 
 	// Save to database
 	if len(results) > 0 {
