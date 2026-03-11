@@ -1,8 +1,10 @@
 package apple
 
 import (
+	"log"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -45,11 +47,29 @@ func (s *Session) RUnlock() { s.mu.RUnlock() }
 
 // NewSession creates a new session
 func NewSession() *Session {
+	return NewSessionWithProxy("")
+}
+
+// NewSessionWithProxy creates a new session with optional proxy support
+func NewSessionWithProxy(proxyURL string) *Session {
 	jar, _ := cookiejar.New(nil)
+	
+	transport := &http.Transport{}
+	
+	if proxyURL != "" {
+		if parsed, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(parsed)
+			log.Printf("[Apple] Using proxy: %s", proxyURL)
+		} else {
+			log.Printf("[Apple] Invalid proxy URL: %s, error: %v", proxyURL, err)
+		}
+	}
+	
 	return &Session{
 		Client: &http.Client{
-			Jar:     jar,
-			Timeout: 30 * time.Second,
+			Jar:       jar,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 		LastActivity: time.Now(),
 	}

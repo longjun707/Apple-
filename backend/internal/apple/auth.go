@@ -135,6 +135,13 @@ func NewAppleAuth() *AppleAuth {
 	}
 }
 
+// NewAppleAuthWithProxy creates a new auth client with proxy support
+func NewAppleAuthWithProxy(proxyURL string) *AppleAuth {
+	return &AppleAuth{
+		session: NewSessionWithProxy(proxyURL),
+	}
+}
+
 // GetSession returns the current session
 func (a *AppleAuth) GetSession() *Session {
 	return a.session

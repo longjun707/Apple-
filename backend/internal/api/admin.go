@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -161,6 +162,52 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 
 // maxSessionAge is the maximum age for a restored Apple session (7 days)
 const maxSessionAge = 7 * 24 * time.Hour
+
+// getProxyURL gets the proxy URL from settings
+// If it's an extraction API (contains "extract" or similar), fetch the real proxy first
+func getProxyURL() string {
+	if store.DB == nil {
+		return ""
+	}
+	
+	proxyConfig, _ := store.GetSetting("proxy_url")
+	if proxyConfig == "" {
+		return ""
+	}
+	
+	// Check if this is an extraction API (common patterns: extract, api, core-extract)
+	if strings.Contains(proxyConfig, "extract") || strings.Contains(proxyConfig, "/api/") {
+		// It's an extraction API, fetch the real proxy
+		log.Printf("[Proxy] Fetching proxy from API: %s", proxyConfig)
+		
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(proxyConfig)
+		if err != nil {
+			log.Printf("[Proxy] Failed to fetch proxy: %v", err)
+			return ""
+		}
+		defer resp.Body.Close()
+		
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("[Proxy] Failed to read proxy response: %v", err)
+			return ""
+		}
+		
+		proxyAddr := strings.TrimSpace(string(body))
+		log.Printf("[Proxy] Got proxy address: %s", proxyAddr)
+		
+		// If the response doesn't have a scheme, add http://
+		if proxyAddr != "" && !strings.HasPrefix(proxyAddr, "http") && !strings.HasPrefix(proxyAddr, "socks") {
+			proxyAddr = "http://" + proxyAddr
+		}
+		
+		return proxyAddr
+	}
+	
+	// Direct proxy URL
+	return proxyConfig
+}
 
 // ensureAppleSession checks if Apple session is active for the account, tries to restore from DB if not
 func ensureAppleSession(session *SessionState, accountID uint) bool {
@@ -462,8 +509,16 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 		return
 	}
 
-	// Create Apple auth client
-	auth := apple.NewAppleAuth()
+	// Get proxy from settings
+	proxyURL := getProxyURL()
+	
+	// Create Apple auth client (with proxy if configured)
+	var auth *apple.AppleAuth
+	if proxyURL != "" {
+		auth = apple.NewAppleAuthWithProxy(proxyURL)
+	} else {
+		auth = apple.NewAppleAuth()
+	}
 	result, err := auth.Login(account.AppleID, plainPassword)
 
 	// Update account status
