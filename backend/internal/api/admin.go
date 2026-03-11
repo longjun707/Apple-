@@ -665,8 +665,16 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 		log.Printf("[2FA] Bootstrap warning (session still valid): %v", err)
 	}
 
-	// Log cookies after Bootstrap
-	log.Printf("[2FA] Cookies AFTER Bootstrap:")
+	// CRITICAL: Call ListEmails to trigger aidsp cookie from Apple server
+	// Without this, auto HME creation will fail with 401
+	if _, err := session.HME.ListEmails(); err != nil {
+		log.Printf("[2FA] ListEmails warning (getting aidsp cookie): %v", err)
+	} else {
+		log.Printf("[2FA] ListEmails succeeded, aidsp cookie should be set")
+	}
+
+	// Log cookies after Bootstrap + ListEmails
+	log.Printf("[2FA] Cookies AFTER Bootstrap + ListEmails:")
 	session.Auth.LogAllCookies()
 
 	// Update account status

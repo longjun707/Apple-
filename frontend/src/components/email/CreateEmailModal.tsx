@@ -19,16 +19,6 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
   const [createdEmail, setCreatedEmail] = useState<HMEEmail | null>(null)
   const queryClient = useQueryClient()
 
-  // Reset form when modal opens
-  useEffect(() => {
-    if (open) {
-      setLabel('')
-      setNote('')
-      setForwardTo('')
-      setCreatedEmail(null)
-    }
-  }, [open])
-
   // Fetch available forward-to emails
   const { data: forwardEmails, isLoading: loadingForward } = useQuery({
     queryKey: ['forward-emails', accountId],
@@ -41,12 +31,23 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
     staleTime: 60_000,
   })
 
-  // Auto-select first forward email
+  // Reset form when modal opens
   useEffect(() => {
-    if (forwardEmails?.length && !forwardTo) {
+    if (open) {
+      setLabel('')
+      setNote('')
+      setCreatedEmail(null)
+      // 延迟设置 forwardTo，等待 forwardEmails 加载
+      setForwardTo('')
+    }
+  }, [open])
+
+  // Auto-select first forward email after data loads (only when forwardTo is empty)
+  useEffect(() => {
+    if (open && forwardEmails?.length && forwardTo === '') {
       setForwardTo(forwardEmails[0])
     }
-  }, [forwardEmails, forwardTo])
+  }, [open, forwardEmails, forwardTo])
 
   const mutation = useMutation({
     mutationFn: () =>

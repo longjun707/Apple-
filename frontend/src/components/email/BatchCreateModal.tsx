@@ -31,22 +31,23 @@ export default function BatchCreateModal({ open, onClose, accountId }: BatchCrea
     staleTime: 60_000,
   })
 
-  // Auto-select first
-  useEffect(() => {
-    if (forwardEmails?.length && !forwardTo) {
-      setForwardTo(forwardEmails[0])
-    }
-  }, [forwardEmails, forwardTo])
-
-  // Reset form when modal opens
+  // Reset form when modal opens, then auto-select first forward email
   useEffect(() => {
     if (open) {
       setCount(5)
       setPrefix('Auto')
-      setForwardTo('')
       setResult(null)
+      // 延迟设置 forwardTo，等待 forwardEmails 加载
+      setForwardTo('')
     }
   }, [open])
+
+  // Auto-select first forward email after data loads (only when forwardTo is empty)
+  useEffect(() => {
+    if (open && forwardEmails?.length && forwardTo === '') {
+      setForwardTo(forwardEmails[0])
+    }
+  }, [open, forwardEmails, forwardTo])
 
   const mutation = useMutation({
     mutationFn: () => api.batchCreateAccountHME(accountId, count, prefix, 1000, forwardTo || undefined),
