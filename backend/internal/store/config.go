@@ -132,6 +132,7 @@ func AutoMigrate() error {
 		&Account{},
 		&HMERecord{},
 		&LoginLog{},
+		&SystemSetting{},
 	)
 	if err != nil {
 		return err

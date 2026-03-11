@@ -1,13 +1,49 @@
-import { useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useState, useEffect } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useAuthStore } from '@/stores/authStore'
 import { toast } from '@/stores/toastStore'
-import { Lock, User, Activity, CheckCircle2, XCircle } from 'lucide-react'
+import { Lock, User, Activity, CheckCircle2, XCircle, Globe } from 'lucide-react'
 import Button from '@/components/ui/Button'
 
 export default function SettingsPage() {
   const admin = useAuthStore((s) => s.admin)
+  const queryClient = useQueryClient()
+
+  // ---- Proxy Settings ----
+  const [proxyUrl, setProxyUrl] = useState('')
+  const [proxyError, setProxyError] = useState('')
+
+  const { data: settingsData } = useQuery({
+    queryKey: ['systemSettings'],
+    queryFn: () => api.getSystemSettings(),
+  })
+
+  useEffect(() => {
+    if (settingsData?.data?.proxyUrl !== undefined) {
+      setProxyUrl(settingsData.data.proxyUrl)
+    }
+  }, [settingsData])
+
+  const saveProxyMutation = useMutation({
+    mutationFn: () => api.updateSystemSettings({ proxyUrl }),
+    onSuccess: (res) => {
+      if (res.success) {
+        toast.success('代理设置已保存')
+        setProxyError('')
+        queryClient.invalidateQueries({ queryKey: ['systemSettings'] })
+      } else {
+        setProxyError(res.error || '保存失败')
+      }
+    },
+    onError: () => setProxyError('网络错误'),
+  })
+
+  const handleProxySubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    setProxyError('')
+    saveProxyMutation.mutate()
+  }
 
   // ---- Change Password ----
   const [oldPassword, setOldPassword] = useState('')
@@ -62,6 +98,44 @@ export default function SettingsPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {/* Proxy Settings */}
+        <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 p-6">
+          <div className="flex items-center gap-2.5 mb-5">
+            <div className="w-8 h-8 bg-orange-50 rounded-lg flex items-center justify-center">
+              <Globe className="w-4 h-4 text-orange-600" />
+            </div>
+            <h3 className="text-[15px] font-semibold text-gray-900">代理设置</h3>
+          </div>
+
+          <form onSubmit={handleProxySubmit} className="space-y-4">
+            <div>
+              <label className="block text-[13px] font-medium text-gray-600 mb-1.5">代理地址</label>
+              <input
+                type="text"
+                value={proxyUrl}
+                onChange={(e) => setProxyUrl(e.target.value)}
+                className="input"
+                placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+              />
+              <p className="text-xs text-gray-400 mt-1.5">留空表示不使用代理，支持 HTTP/HTTPS/SOCKS5</p>
+            </div>
+
+            {proxyError && (
+              <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm animate-fade-in">
+                {proxyError}
+              </div>
+            )}
+
+            <Button
+              type="submit"
+              loading={saveProxyMutation.isPending}
+              className="w-full"
+            >
+              保存代理设置
+            </Button>
+          </form>
+        </div>
+
         {/* Change Password */}
         <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 p-6">
           <div className="flex items-center gap-2.5 mb-5">
@@ -124,10 +198,8 @@ export default function SettingsPage() {
           </form>
         </div>
 
-        {/* Right column */}
-        <div className="space-y-5">
-          {/* Admin Info */}
-          <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 p-6">
+        {/* Admin Info */}
+        <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 p-6">
             <div className="flex items-center gap-2.5 mb-5">
               <div className="w-8 h-8 bg-purple-50 rounded-lg flex items-center justify-center">
                 <User className="w-4 h-4 text-purple-600" />
@@ -150,8 +222,8 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* System Health */}
-          <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 p-6">
+        {/* System Health */}
+        <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 p-6">
             <div className="flex items-center gap-2.5 mb-5">
               <div className="w-8 h-8 bg-green-50 rounded-lg flex items-center justify-center">
                 <Activity className="w-4 h-4 text-green-600" />
@@ -183,7 +255,6 @@ export default function SettingsPage() {
               </div>
             </div>
           </div>
-        </div>
       </div>
     </div>
   )

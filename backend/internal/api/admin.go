@@ -686,6 +686,7 @@ func RefreshAllSessions() {
 		// Restore session
 		auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
 		hme := apple.NewHMEClient(auth)
+		hme.MarkRestoredSession() // Skip Bootstrap validation for restored sessions
 
 		// Try to extend session
 		ok, err := hme.ExtendSession()
