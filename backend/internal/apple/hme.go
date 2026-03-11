@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -562,7 +563,11 @@ func (c *HMEClient) GetAccountInfo() (*AccountInfo, error) {
 	return &result, nil
 }
 
+// ErrRateLimitExceeded indicates account hit rate limit, should skip and retry later
+var ErrRateLimitExceeded = fmt.Errorf("rate_limit_exceeded")
+
 // BatchCreateEmails creates multiple HME addresses
+// Returns early if rate_limit_exceeded is encountered
 func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int, forwardToEmail string) ([]HMEEmail, []error) {
 	results := make([]HMEEmail, 0, count)
 	errors := make([]error, 0)
@@ -574,6 +579,11 @@ func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int
 		hme, err := c.CreateEmail(label, note, forwardToEmail)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("email %d: %w", i+1, err))
+			// Check for rate limit - stop immediately and skip this account
+			if strings.Contains(err.Error(), "rate_limit_exceeded") {
+				log.Printf("[HME] Rate limit exceeded, stopping batch creation early")
+				return results, errors
+			}
 		} else {
 			results = append(results, *hme)
 		}
