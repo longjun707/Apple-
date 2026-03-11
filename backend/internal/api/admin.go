@@ -113,10 +113,18 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 			updates["country"] = profileResp.Country
 		}
 	// Always update alternate_emails (clear stale data when all emails are removed)
-		emailsJSON, _ := json.Marshal(profileResp.AlternateEmails)
+		altEmails := profileResp.AlternateEmails
+		if altEmails == nil {
+			altEmails = []string{}
+		}
+		emailsJSON, _ := json.Marshal(altEmails)
 		updates["alternate_emails"] = string(emailsJSON)
 		// Always update phone_numbers (clear stale data when all numbers are removed)
-		phonesJSON, _ := json.Marshal(profileResp.PhoneNumbers)
+		phones := profileResp.PhoneNumbers
+		if phones == nil {
+			phones = []apple.SecurityPhoneNumber{}
+		}
+		phonesJSON, _ := json.Marshal(phones)
 		updates["phone_numbers"] = string(phonesJSON)
 		if len(profileResp.PhoneNumbers) > 0 {
 			log.Printf("[Profile] Saving %d phone numbers for account %d", len(profileResp.PhoneNumbers), accountID)
@@ -855,13 +863,75 @@ type AutoHMELogEntry struct {
 }
 
 var autoHMEStatus = &AutoHMETaskStatus{
-	Enabled:         true,
+	Enabled:         false, // Default disabled; loaded from DB on startup
 	IntervalMinutes: 30,
 	CountPerAccount: 20,
 	Logs:            make([]AutoHMELogEntry, 0),
 }
 
+// autoHMEResetCh signals the periodic loop to re-read settings (e.g. after interval change)
+var autoHMEResetCh = make(chan struct{}, 1)
+
 const maxLogEntries = 500
+
+// loadAutoHMESettings loads auto-task settings from database
+func loadAutoHMESettings() {
+	if store.DB == nil {
+		return
+	}
+	autoHMEStatus.mu.Lock()
+	defer autoHMEStatus.mu.Unlock()
+
+	if val, err := store.GetSetting("auto_hme_enabled"); err == nil {
+		autoHMEStatus.Enabled = val == "true"
+	}
+	if val, err := store.GetSetting("auto_hme_interval"); err == nil {
+		if n, err := strconv.Atoi(val); err == nil && n >= 5 {
+			autoHMEStatus.IntervalMinutes = n
+		}
+	}
+	if val, err := store.GetSetting("auto_hme_count"); err == nil {
+		if n, err := strconv.Atoi(val); err == nil && n >= 1 {
+			autoHMEStatus.CountPerAccount = n
+		}
+	}
+	log.Printf("[AutoHME] Loaded settings: enabled=%v, interval=%d, count=%d",
+		autoHMEStatus.Enabled, autoHMEStatus.IntervalMinutes, autoHMEStatus.CountPerAccount)
+}
+
+// saveAutoHMESettings persists current auto-task settings to database
+func saveAutoHMESettings() {
+	if store.DB == nil {
+		return
+	}
+	autoHMEStatus.mu.RLock()
+	enabled := autoHMEStatus.Enabled
+	intervalMin := autoHMEStatus.IntervalMinutes
+	countPerAcc := autoHMEStatus.CountPerAccount
+	autoHMEStatus.mu.RUnlock()
+
+	store.SetSetting("auto_hme_enabled", fmt.Sprintf("%v", enabled))
+	store.SetSetting("auto_hme_interval", strconv.Itoa(intervalMin))
+	store.SetSetting("auto_hme_count", strconv.Itoa(countPerAcc))
+}
+
+// getAccountForwardEmail returns the most-used forward email for an account from existing HME records
+func getAccountForwardEmail(accountID uint) string {
+	if store.DB == nil {
+		return ""
+	}
+	var result struct {
+		ForwardToEmail string
+	}
+	store.DB.Model(&store.HMERecord{}).
+		Select("forward_to_email").
+		Where("account_id = ? AND forward_to_email != '' AND deleted_at IS NULL", accountID).
+		Group("forward_to_email").
+		Order("COUNT(*) DESC").
+		Limit(1).
+		Find(&result)
+	return result.ForwardToEmail
+}
 
 // addAutoHMELog adds a log entry (thread-safe)
 func addAutoHMELog(level, message string) {
@@ -885,6 +955,9 @@ func addAutoHMELog(level, message string) {
 
 // StartPeriodicHMECreation starts a goroutine that creates HME for all accounts periodically
 func StartPeriodicHMECreation() {
+	// Load persisted settings from DB before starting the loop
+	loadAutoHMESettings()
+
 	go func() {
 		for {
 			// Read settings under lock
@@ -898,7 +971,16 @@ func StartPeriodicHMECreation() {
 			autoHMEStatus.mu.Unlock()
 
 			addAutoHMELog("info", fmt.Sprintf("下次自动创建将在 %d 分钟后执行", intervalMin))
-			time.Sleep(time.Duration(intervalMin) * time.Minute)
+
+			// Interruptible sleep: wakes up on interval/settings change or normal timeout
+			select {
+			case <-time.After(time.Duration(intervalMin) * time.Minute):
+				// Normal timeout — proceed to execute
+			case <-autoHMEResetCh:
+				// Settings changed — re-read interval and restart wait
+				addAutoHMELog("info", "检测到设置变更，重新调度...")
+				continue
+			}
 
 			// Read enabled and countPerAccount under lock
 			autoHMEStatus.mu.RLock()
@@ -916,9 +998,10 @@ func StartPeriodicHMECreation() {
 	}()
 	autoHMEStatus.mu.RLock()
 	initInterval := autoHMEStatus.IntervalMinutes
+	initEnabled := autoHMEStatus.Enabled
 	initCount := autoHMEStatus.CountPerAccount
 	autoHMEStatus.mu.RUnlock()
-	addAutoHMELog("info", fmt.Sprintf("定时自动创建 HME 任务已启动 (每 %d 分钟执行一次，每账户创建 %d 个)", initInterval, initCount))
+	addAutoHMELog("info", fmt.Sprintf("定时自动创建 HME 任务已启动 (启用=%v, 每 %d 分钟执行一次，每账户创建 %d 个)", initEnabled, initInterval, initCount))
 }
 
 // AutoCreateHMEForAllAccounts creates HME for all accounts with valid sessions
@@ -984,8 +1067,7 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		autoHMEStatus.mu.Unlock()
 
 		addAutoHMELog("info", fmt.Sprintf("开始处理账户 [%d/%d]: %s", idx+1, len(accounts), account.AppleID))
-
-		// Restore session
+		// Use direct connection (same as manual creation) - proxy often gets rate-limited
 		auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
 		hme := apple.NewHMEClient(auth)
 		hme.MarkRestoredSession() // Skip Bootstrap validation for restored sessions
@@ -993,7 +1075,9 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		// First extend session to make sure it's valid
 		ok, err := hme.ExtendSession()
 		if !ok {
-			addAutoHMELog("error", fmt.Sprintf("账户 %s 会话无效: %v，跳过", account.AppleID, err))
+			addAutoHMELog("error", fmt.Sprintf("账户 %s 会话无效: %v，清理并跳过", account.AppleID, err))
+			// Clear invalid session so we don't retry next cycle
+			go clearInvalidSession(account.ID)
 			continue
 		}
 
@@ -1005,12 +1089,17 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		labelPrefix := fmt.Sprintf("Auto-%s", time.Now().Format("0102-1504"))
 		delayMs := 1000 // 1 second between creations, same as manual default
 
-		results, errs := hme.BatchCreateEmails(countPerAccount, labelPrefix, delayMs, "")
+		// Look up the account's preferred forward email from existing HME records
+		forwardEmail := getAccountForwardEmail(account.ID)
 
-		// Update progress
-		autoHMEStatus.mu.Lock()
-		autoHMEStatus.CurrentProgress = len(results) + len(errs)
-		autoHMEStatus.mu.Unlock()
+		// Progress callback for real-time updates
+		onProgress := func(created, failed, total int) {
+			autoHMEStatus.mu.Lock()
+			autoHMEStatus.CurrentProgress = created + failed
+			autoHMEStatus.mu.Unlock()
+		}
+
+		results, errs := hme.BatchCreateEmails(countPerAccount, labelPrefix, delayMs, forwardEmail, onProgress)
 
 		// Save to database
 		if len(results) > 0 {
@@ -1043,8 +1132,29 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		count, _ := hmeRepo.Count(account.ID)
 		store.NewAccountRepo().UpdateHMECount(account.ID, int(count))
 
-		// Save session (may have new cookies)
-		saveAppleSession(account.ID, auth)
+		// Classify batch errors: 401 = session expired, 403 = access denied / rate limit
+		has401 := false
+		has403 := false
+		for _, e := range errs {
+			errMsg := e.Error()
+			if strings.Contains(errMsg, "HTTP 401") {
+				has401 = true
+				break
+			}
+			if strings.Contains(errMsg, "HTTP 403") {
+				has403 = true
+			}
+		}
+		if has401 {
+			addAutoHMELog("warning", fmt.Sprintf("账户 %s 会话已失效 (401)，清理 session", account.AppleID))
+			go clearInvalidSession(account.ID)
+		} else {
+			// 403 is NOT session expiry — likely IP-level rate limit. Keep the session.
+			if has403 {
+				addAutoHMELog("warning", fmt.Sprintf("账户 %s 创建被拒绝 (403)，可能触发 IP 速率限制，保留 session", account.AppleID))
+			}
+			saveAppleSession(account.ID, auth)
+		}
 
 		totalCreated += created
 		totalFailed += failed
@@ -1056,8 +1166,15 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 
 		addAutoHMELog("success", fmt.Sprintf("账户 %s: 完成，创建成功=%d，失败=%d", account.AppleID, created, failed))
 
-		// Small delay between accounts
-		time.Sleep(2 * time.Second)
+		// If 403 on this account with zero successes, likely IP-level rate limit.
+		// Skip remaining accounts — they'll all fail from the same IP.
+		if has403 && created == 0 {
+			addAutoHMELog("warning", "检测到连续 403 (IP 速率限制)，跳过剩余账户，等待下次执行")
+			break
+		}
+
+		// Delay between accounts to reduce rate-limit risk
+		time.Sleep(5 * time.Second)
 	}
 
 	autoHMEStatus.mu.Lock()
@@ -1138,11 +1255,15 @@ func (s *Server) UpdateAutoHMESettings(c *gin.Context) {
 		return
 	}
 
+	intervalChanged := false
 	autoHMEStatus.mu.Lock()
 	if req.Enabled != nil {
 		autoHMEStatus.Enabled = *req.Enabled
 	}
 	if req.IntervalMinutes != nil && *req.IntervalMinutes >= 5 {
+		if autoHMEStatus.IntervalMinutes != *req.IntervalMinutes {
+			intervalChanged = true
+		}
 		autoHMEStatus.IntervalMinutes = *req.IntervalMinutes
 	}
 	if req.CountPerAccount != nil && *req.CountPerAccount >= 1 && *req.CountPerAccount <= 100 {
@@ -1153,6 +1274,17 @@ func (s *Server) UpdateAutoHMESettings(c *gin.Context) {
 	intervalMin := autoHMEStatus.IntervalMinutes
 	countPerAcc := autoHMEStatus.CountPerAccount
 	autoHMEStatus.mu.Unlock()
+
+	// Persist to database
+	go saveAutoHMESettings()
+
+	// If interval changed, wake up the sleeping goroutine to re-schedule
+	if intervalChanged {
+		select {
+		case autoHMEResetCh <- struct{}{}:
+		default:
+		}
+	}
 
 	addAutoHMELog("info", fmt.Sprintf("设置已更新: 启用=%v, 间隔=%d分钟, 每账户创建=%d个",
 		enabled, intervalMin, countPerAcc))
@@ -1450,7 +1582,7 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 	if search != "" {
 		like := "%" + escapeLike(search) + "%"
 		countQuery = countQuery.Where(
-			"hme_records.email_address LIKE ? ESCAPE '\\' OR hme_records.label LIKE ? ESCAPE '\\' OR accounts.apple_id LIKE ? ESCAPE '\\'",
+			"hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ?",
 			like, like, like,
 		)
 	}
@@ -1464,7 +1596,7 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 	if search != "" {
 		like := "%" + escapeLike(search) + "%"
 		dataQuery = dataQuery.Where(
-			"hme_records.email_address LIKE ? ESCAPE '\\' OR hme_records.label LIKE ? ESCAPE '\\' OR accounts.apple_id LIKE ? ESCAPE '\\'",
+			"hme_records.email_address LIKE ? OR hme_records.label LIKE ? OR accounts.apple_id LIKE ?",
 			like, like, like,
 		)
 	}
@@ -1582,7 +1714,7 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 		req.DelayMs = 1000
 	}
 
-	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail)
+	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail, nil)
 
 	// Save session after batch creation (new cookies may have been set)
 	go saveAppleSession(uint(id), session.Auth)

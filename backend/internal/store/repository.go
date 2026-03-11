@@ -99,7 +99,7 @@ func (r *AccountRepo) List(page, pageSize int, search string) ([]Account, int64,
 	query := DB.Model(&Account{})
 	if search != "" {
 		like := "%" + escapeLike(search) + "%"
-		query = query.Where("apple_id LIKE ? ESCAPE '\\' OR full_name LIKE ? ESCAPE '\\' OR remark LIKE ? ESCAPE '\\'", like, like, like)
+		query = query.Where("apple_id LIKE ? OR full_name LIKE ? OR remark LIKE ?", like, like, like)
 	}
 
 	query.Count(&total)

@@ -772,10 +772,19 @@ func (a *AppleAuth) ExportSessionData() (token, scnt, sessionID, cookiesJSON str
 
 // RestoreAppleAuth restores a full AppleAuth from persisted session data
 func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
+	return restoreAppleAuthSession(NewAppleAuth(), token, scnt, sessionID, cookiesJSON)
+}
+
+// RestoreAppleAuthWithProxy restores a full AppleAuth with proxy support
+func RestoreAppleAuthWithProxy(token, scnt, sessionID, cookiesJSON, proxyURL string) *AppleAuth {
+	return restoreAppleAuthSession(NewAppleAuthWithProxy(proxyURL), token, scnt, sessionID, cookiesJSON)
+}
+
+// restoreAppleAuthSession is the shared restore logic
+func restoreAppleAuthSession(auth *AppleAuth, token, scnt, sessionID, cookiesJSON string) *AppleAuth {
 	log.Printf("[Restore] Input: token_len=%d, scnt_len=%d, sessionID_len=%d, cookiesJSON_len=%d",
 		len(token), len(scnt), len(sessionID), len(cookiesJSON))
 
-	auth := NewAppleAuth()
 	auth.session.mu.Lock()
 	auth.session.SessionToken = token
 	auth.session.SCNT = scnt

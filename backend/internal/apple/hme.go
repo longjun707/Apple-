@@ -562,12 +562,10 @@ func (c *HMEClient) GetAccountInfo() (*AccountInfo, error) {
 	return &result, nil
 }
 
-// ErrRateLimitExceeded indicates account hit rate limit, should skip and retry later
-var ErrRateLimitExceeded = fmt.Errorf("rate_limit_exceeded")
-
 // BatchCreateEmails creates multiple HME addresses
-// Returns early if rate_limit_exceeded is encountered
-func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int, forwardToEmail string) ([]HMEEmail, []error) {
+// onProgress is called after each attempt with (successCount, failCount, total).
+// Returns early on rate limit (HTTP 429/503) or auth failure (HTTP 401/403).
+func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int, forwardToEmail string, onProgress func(created, failed, total int)) ([]HMEEmail, []error) {
 	results := make([]HMEEmail, 0, count)
 	errors := make([]error, 0)
 
@@ -578,13 +576,31 @@ func (c *HMEClient) BatchCreateEmails(count int, labelPrefix string, delayMs int
 		hme, err := c.CreateEmail(label, note, forwardToEmail)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("email %d: %w", i+1, err))
-			// Check for rate limit - stop immediately and skip this account
-			if strings.Contains(err.Error(), "rate_limit_exceeded") {
-				log.Printf("[HME] Rate limit exceeded, stopping batch creation early")
+			errMsg := err.Error()
+			// Check for rate limit (HTTP 429/503) or access denied (HTTP 403, often IP-level rate limit)
+			if strings.Contains(errMsg, "HTTP 429") || strings.Contains(errMsg, "HTTP 503") ||
+				strings.Contains(errMsg, "HTTP 403") || strings.Contains(errMsg, "rate_limit") {
+				log.Printf("[HME] Rate limit / access denied detected, stopping batch early")
+				if onProgress != nil {
+					onProgress(len(results), len(errors), count)
+				}
+				return results, errors
+			}
+			// Check for auth failure (HTTP 401) - session truly expired, no point continuing
+			if strings.Contains(errMsg, "HTTP 401") {
+				log.Printf("[HME] Auth failure (401) detected, stopping batch early")
+				if onProgress != nil {
+					onProgress(len(results), len(errors), count)
+				}
 				return results, errors
 			}
 		} else {
 			results = append(results, *hme)
+		}
+
+		// Report progress
+		if onProgress != nil {
+			onProgress(len(results), len(errors), count)
 		}
 
 		// Delay between creations

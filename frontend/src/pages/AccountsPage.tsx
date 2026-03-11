@@ -107,6 +107,7 @@ export default function AccountsPage() {
   const parsePhones = (phoneNumbers: string | undefined) => {
     try {
       const phones = phoneNumbers ? JSON.parse(phoneNumbers) : []
+      if (!Array.isArray(phones)) return []
       return phones.map((p: { fullNumberWithCountryPrefix?: string; numberWithDialCode?: string }) =>
         p.fullNumberWithCountryPrefix || p.numberWithDialCode || ''
       ).filter(Boolean)
@@ -116,12 +117,13 @@ export default function AccountsPage() {
   }
 
   // 解析备用邮箱
-  const parseAlternateEmails = (alternateEmails: string | string[] | undefined) => {
+  const parseAlternateEmails = (alternateEmails: string | string[] | undefined | null): string[] => {
     try {
       if (typeof alternateEmails === 'string') {
-        return alternateEmails ? JSON.parse(alternateEmails) : []
+        const parsed = alternateEmails ? JSON.parse(alternateEmails) : []
+        return Array.isArray(parsed) ? parsed : []
       }
-      return alternateEmails || []
+      return Array.isArray(alternateEmails) ? alternateEmails : []
     } catch {
       return []
     }
