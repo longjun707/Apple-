@@ -244,14 +244,27 @@ func ensureAppleSession(session *SessionState, accountID uint) bool {
 	auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
 	hme := apple.NewHMEClient(auth)
 
-	// Mark session as restored - skip Bootstrap validation, let HME API validate directly
+	// Mark session as restored - skip Bootstrap validation
 	hme.MarkRestoredSession()
+
+	// Validate session before using (same as AutoCreateHME and RefreshAllSessions)
+	ok, err := hme.ExtendSession()
+	if !ok {
+		log.Printf("[Session] Session for account %d is invalid: %v", accountID, err)
+		// Clear invalid session from database
+		go clearInvalidSession(accountID)
+		return false
+	}
 
 	session.Auth = auth
 	session.HME = hme
 	session.AccountID = accountID
 	session.AppleID = account.AppleID
-	log.Printf("[Session] Restored Apple session for account %d from DB (skipping validation)", accountID)
+	
+	// Save updated session (may have new cookies from ExtendSession)
+	go saveAppleSession(accountID, auth)
+	
+	log.Printf("[Session] Restored and validated Apple session for account %d", accountID)
 	return true
 }
 
