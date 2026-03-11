@@ -1,41 +1,40 @@
 import { useState, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { api } from '@/api/client'
+import { api, getErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/authStore'
 import { Lock, Shield, User } from 'lucide-react'
 import Button from '@/components/ui/Button'
 
-const CREDENTIALS_KEY = 'admin-credentials-v2'
+const LOGIN_PREFERENCES_KEY = 'admin-login-preferences'
 
-interface SavedCredentials {
+interface LoginPreferences {
   username: string
-  password: string
+  rememberMe: boolean
 }
 
-function getSavedCredentials(): SavedCredentials | null {
+function getLoginPreferences(): LoginPreferences | null {
   try {
-    // Migrate: clear old keys if present
+    // Migrate: clear previously stored password data
+    localStorage.removeItem('admin-credentials-v2')
     localStorage.removeItem('admin-credentials')
     localStorage.removeItem('admin-username')
-    
-    const saved = localStorage.getItem(CREDENTIALS_KEY)
+
+    const saved = localStorage.getItem(LOGIN_PREFERENCES_KEY)
     if (!saved) return null
-    
-    const decoded = atob(saved)
-    return JSON.parse(decoded) as SavedCredentials
+
+    return JSON.parse(saved) as LoginPreferences
   } catch {
     return null
   }
 }
 
-function saveCredentials(username: string, password: string) {
-  const data: SavedCredentials = { username, password }
-  const encoded = btoa(JSON.stringify(data))
-  localStorage.setItem(CREDENTIALS_KEY, encoded)
+function saveLoginPreferences(username: string, rememberMe: boolean) {
+  const data: LoginPreferences = { username, rememberMe }
+  localStorage.setItem(LOGIN_PREFERENCES_KEY, JSON.stringify(data))
 }
 
-function clearCredentials() {
-  localStorage.removeItem(CREDENTIALS_KEY)
+function clearLoginPreferences() {
+  localStorage.removeItem(LOGIN_PREFERENCES_KEY)
 }
 
 export default function LoginPage() {
@@ -46,12 +45,12 @@ export default function LoginPage() {
 
   const { setState, setAdmin } = useAuthStore()
 
-  // Load saved credentials on mount
+  // Load safe login preferences on mount
   useEffect(() => {
-    const saved = getSavedCredentials()
-    if (saved) {
+    const saved = getLoginPreferences()
+    if (saved?.rememberMe) {
       setUsername(saved.username)
-      setPassword(saved.password)
+      setRememberMe(saved.rememberMe)
     }
   }, [])
 
@@ -64,16 +63,16 @@ export default function LoginPage() {
       }
       if (res.data) {
         if (rememberMe) {
-          saveCredentials(username, password)
+          saveLoginPreferences(username, true)
         } else {
-          clearCredentials()
+          clearLoginPreferences()
         }
         setAdmin(res.data)
         setState('authenticated')
       }
     },
     onError: (err) => {
-      setError(err instanceof Error ? err.message : '网络错误')
+      setError(getErrorMessage(err))
     },
   })
 
@@ -149,7 +148,7 @@ export default function LoginPage() {
                 onChange={(e) => setRememberMe(e.target.checked)}
                 className="w-4 h-4 rounded border-gray-300 text-apple-blue focus:ring-apple-blue/30"
               />
-              <span className="text-sm text-gray-600">记住密码</span>
+              <span className="text-sm text-gray-600">保持登录</span>
             </label>
 
             <Button

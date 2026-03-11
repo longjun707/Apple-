@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // AdminRepo handles admin user database operations
@@ -118,6 +119,7 @@ func (r *AccountRepo) SaveSession(accountID uint, sessionToken, scnt, sessionID,
 		"session_id":       sessionID,
 		"session_cookies":  cookies,
 		"session_saved_at": now,
+		"last_error":       "",
 	}).Error
 }
 
@@ -179,7 +181,7 @@ func (r *HMERepo) BatchCreate(records []HMERecord) error {
 	if len(records) == 0 {
 		return nil
 	}
-	return DB.CreateInBatches(records, 100).Error
+	return DB.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(records, 100).Error
 }
 
 // FindByAccountID finds all HME records for an account
@@ -202,9 +204,12 @@ func (r *HMERepo) FindByEmail(email string) (*HMERecord, error) {
 // FindByHMEID finds an HME record by Apple's HME ID
 func (r *HMERepo) FindByHMEID(hmeID string) (*HMERecord, error) {
 	var record HMERecord
-	err := DB.Where("hme_id = ?", hmeID).First(&record).Error
-	if err != nil {
-		return nil, err
+	result := DB.Where("hme_id = ?", hmeID).Limit(1).Find(&record)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, gorm.ErrRecordNotFound
 	}
 	return &record, nil
 }

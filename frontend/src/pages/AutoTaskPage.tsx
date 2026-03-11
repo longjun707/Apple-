@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/api/client'
+import { api, getErrorMessage, unwrapResponse, type PhoneNumber } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
   Loader2,
@@ -19,11 +19,6 @@ import {
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
 
-interface PhoneNumber {
-  id: number
-  numberWithDialCode?: string
-  fullNumberWithCountryPrefix?: string
-}
 
 interface EligibleAccount {
   appleId: string
@@ -39,6 +34,7 @@ interface AutoHMEStatus {
   lastRunTime: string | null
   nextRunTime: string | null
   currentAccount: string
+  currentAccountIndex: number
   currentProgress: number
   totalAccounts: number
   processedAccounts: number
@@ -60,23 +56,28 @@ export default function AutoTaskPage() {
   const [countPerAccount, setCountPerAccount] = useState(20)
 
   // Fetch status
-  const { data: statusData } = useQuery({
+  const {
+    data: statusData,
+    isError: statusQueryError,
+    error: statusError,
+  } = useQuery({
     queryKey: ['auto-hme-status'],
     queryFn: async () => {
-      const res = await api.getAutoHMEStatus()
-      if (!res.success) throw new Error(res.error)
-      return res.data as AutoHMEStatus
+      return unwrapResponse(await api.getAutoHMEStatus(), '获取自动任务状态失败') as AutoHMEStatus
     },
     refetchInterval: 3000, // Poll every 3 seconds
   })
 
   // Fetch logs
-  const { data: logsData, isLoading: logsLoading } = useQuery({
+  const {
+    data: logsData,
+    isLoading: logsLoading,
+    isError: logsQueryError,
+    error: logsError,
+  } = useQuery({
     queryKey: ['auto-hme-logs'],
     queryFn: async () => {
-      const res = await api.getAutoHMELogs()
-      if (!res.success) throw new Error(res.error)
-      return res.data as LogEntry[]
+      return unwrapResponse(await api.getAutoHMELogs(), '获取自动任务日志失败') as LogEntry[]
     },
     refetchInterval: 5000, // Poll every 5 seconds
   })
@@ -92,6 +93,7 @@ export default function AutoTaskPage() {
         toast.error(res.error || '操作失败')
       }
     },
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   // Update settings
@@ -106,6 +108,7 @@ export default function AutoTaskPage() {
         toast.error(res.error || '保存失败')
       }
     },
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   // Trigger manually
@@ -119,6 +122,7 @@ export default function AutoTaskPage() {
         toast.error(res.error || '触发失败')
       }
     },
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   const formatTime = (timeStr: string | null) => {
@@ -159,6 +163,24 @@ export default function AutoTaskPage() {
     }
   }
 
+  const currentAccountIndex =
+    statusData?.running && statusData.currentAccount
+      ? statusData.currentAccountIndex || Math.min(statusData.processedAccounts + 1, statusData.totalAccounts)
+      : 0
+
+  const overallProgressPercent =
+    statusData && statusData.totalAccounts > 0
+      ? Math.min(
+          100,
+          ((statusData.processedAccounts +
+            (statusData.running && statusData.countPerAccount > 0
+              ? statusData.currentProgress / statusData.countPerAccount
+              : 0)) /
+            statusData.totalAccounts) *
+            100
+        )
+      : 0
+
   return (
     <div className="animate-fade-in">
       {/* Header */}
@@ -193,6 +215,13 @@ export default function AutoTaskPage() {
           </Button>
         </div>
       </div>
+
+      {(statusQueryError || logsQueryError) && (
+        <div className="mb-6 rounded-2xl border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-700">
+          {statusQueryError && <div>任务状态加载失败：{getErrorMessage(statusError, '获取自动任务状态失败')}</div>}
+          {logsQueryError && <div>任务日志加载失败：{getErrorMessage(logsError, '获取自动任务日志失败')}</div>}
+        </div>
+      )}
 
       {/* Settings Panel */}
       {showSettings && (
@@ -303,18 +332,21 @@ export default function AutoTaskPage() {
           {statusData?.running ? (
             <>
               <p className="text-lg font-bold text-gray-900">
-                {statusData.processedAccounts}/{statusData.totalAccounts} 账户
+                {currentAccountIndex}/{statusData.totalAccounts} 账户
               </p>
               <div className="mt-2 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-apple-blue rounded-full transition-all"
                   style={{
-                    width: `${statusData.totalAccounts > 0 ? (statusData.processedAccounts / statusData.totalAccounts) * 100 : 0}%`,
+                    width: `${overallProgressPercent}%`,
                   }}
                 />
               </div>
               <p className="text-xs text-gray-400 mt-1">
-                当前账户: {statusData.currentProgress}/{statusData.countPerAccount}
+                已完成账户: {statusData.processedAccounts}/{statusData.totalAccounts}
+              </p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                当前账户进度: {statusData.currentProgress}/{statusData.countPerAccount}
               </p>
             </>
           ) : (

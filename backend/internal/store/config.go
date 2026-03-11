@@ -138,13 +138,13 @@ func AutoMigrate() error {
 		return err
 	}
 
-	// Ensure phone_numbers column exists (GORM sometimes doesn't add new columns)
-	// MySQL will error if column exists, but that's OK
-	result := DB.Exec("ALTER TABLE accounts ADD COLUMN phone_numbers TEXT")
-	if result.Error != nil {
-		log.Printf("[Migration] phone_numbers column: %v (may already exist)", result.Error)
-	} else {
-		log.Printf("[Migration] Added phone_numbers column to accounts table")
+	// Ensure phone_numbers column exists (keep migration idempotent and quiet on restart)
+	if !DB.Migrator().HasColumn(&Account{}, "PhoneNumbers") {
+		if err := DB.Migrator().AddColumn(&Account{}, "PhoneNumbers"); err != nil {
+			log.Printf("[Migration] Failed to add phone_numbers column: %v", err)
+		} else {
+			log.Printf("[Migration] Added phone_numbers column to accounts table")
+		}
 	}
 
 	// Migrate session_scnt and session_id from VARCHAR to TEXT (fix truncation issue)

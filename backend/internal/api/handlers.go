@@ -26,17 +26,80 @@ const (
 	SessionCleanInterval = 10 * time.Minute
 )
 
+// AppleSessionState holds Apple account state scoped to a single account
+type AppleSessionState struct {
+	AccountID uint
+	AppleID   string
+	Auth      *apple.AppleAuth
+	HME       *apple.HMEClient
+}
+
 // SessionState holds per-session state
 type SessionState struct {
-	Auth       *apple.AppleAuth
-	HME        *apple.HMEClient
-	AccountID  uint   // Database account ID (Apple account)
-	AppleID    string // Apple ID email
 	AdminID    uint   // Admin user ID
 	AdminName  string // Admin username
 	RememberMe bool   // Whether to keep session longer
 	CreatedAt  time.Time
 	LastActive time.Time
+
+	appleMu       sync.RWMutex
+	appleSessions map[uint]*AppleSessionState
+}
+
+var appleAccountLocks sync.Map
+
+func lockAppleAccount(accountID uint) func() {
+	if accountID == 0 {
+		return func() {}
+	}
+	lockValue, _ := appleAccountLocks.LoadOrStore(accountID, &sync.Mutex{})
+	mu := lockValue.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+func (s *SessionState) getAppleSession(accountID uint) (*AppleSessionState, bool) {
+	if accountID == 0 {
+		return nil, false
+	}
+	s.appleMu.RLock()
+	defer s.appleMu.RUnlock()
+	appleSession, ok := s.appleSessions[accountID]
+	if !ok || appleSession == nil {
+		return nil, false
+	}
+	return appleSession, true
+}
+
+func (s *SessionState) setAppleSession(accountID uint, appleID string, auth *apple.AppleAuth, hme *apple.HMEClient) *AppleSessionState {
+	if accountID == 0 {
+		return nil
+	}
+	s.appleMu.Lock()
+	defer s.appleMu.Unlock()
+	if s.appleSessions == nil {
+		s.appleSessions = make(map[uint]*AppleSessionState)
+	}
+	appleSession := &AppleSessionState{
+		AccountID: accountID,
+		AppleID:   appleID,
+		Auth:      auth,
+		HME:       hme,
+	}
+	s.appleSessions[accountID] = appleSession
+	return appleSession
+}
+
+func (s *SessionState) clearAppleSession(accountID uint) {
+	if accountID == 0 {
+		return
+	}
+	s.appleMu.Lock()
+	defer s.appleMu.Unlock()
+	if s.appleSessions == nil {
+		return
+	}
+	delete(s.appleSessions, accountID)
 }
 
 // NewServer creates a new API server
@@ -87,8 +150,9 @@ func (s *Server) getSession(sessionID string) *SessionState {
 
 	now := time.Now()
 	session := &SessionState{
-		CreatedAt:  now,
-		LastActive: now,
+		CreatedAt:     now,
+		LastActive:    now,
+		appleSessions: make(map[uint]*AppleSessionState),
 	}
 	s.sessions[sessionID] = session
 	return session

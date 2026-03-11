@@ -14,6 +14,59 @@ export interface APIResponse<T = unknown> {
   error?: string
 }
 
+export class APIError extends Error {
+  status?: number
+
+  constructor(message: string, status?: number) {
+    super(message)
+    this.name = 'APIError'
+    this.status = status
+  }
+}
+
+export function assertSuccess<T>(
+  response: APIResponse<T>,
+  fallbackMessage = '请求失败'
+): APIResponse<T> {
+  if (!response.success) {
+    throw new APIError(response.error || fallbackMessage)
+  }
+
+  return response
+}
+
+export function unwrapResponse<T>(
+  response: APIResponse<T>,
+  fallbackMessage = '请求失败'
+): T {
+  const safeResponse = assertSuccess(response, fallbackMessage)
+
+  if (safeResponse.data === undefined) {
+    throw new APIError(fallbackMessage)
+  }
+
+  return safeResponse.data
+}
+
+export function getErrorMessage(error: unknown, fallbackMessage = '网络错误') {
+  if (typeof error === 'string') {
+    return error || fallbackMessage
+  }
+  if (error instanceof APIError) {
+    return error.message || fallbackMessage
+  }
+
+  if (error instanceof Error) {
+    return error.message || fallbackMessage
+  }
+
+  return fallbackMessage
+}
+
+export function isAppleAccountLoginRequiredError(error: unknown) {
+  return getErrorMessage(error).includes('请先登录此Apple账户')
+}
+
 export interface AdminInfo {
   id: number
   username: string
@@ -53,7 +106,8 @@ export interface AccountListResult {
 
 export interface PhoneNumber {
   id: number
-  numberWithDialCode: string
+  numberWithDialCode?: string
+  fullNumberWithCountryPrefix?: string
 }
 
 export interface AppleLoginResult {
@@ -286,7 +340,7 @@ export const api = {
     request('PUT', `/accounts/${accountId}/forward-email`, { email }),
 
   // Health
-  health: () => request('GET', '/health'),
+  health: () => request<{ status: string }>('GET', '/health'),
 
   // Auto HME task
   getAutoHMEStatus: () => request('GET', '/admin/auto-hme/status'),
@@ -304,4 +358,8 @@ export const api = {
 export function clearSession() {
   sessionId = null
   localStorage.removeItem('sessionId')
+}
+
+export function hasSession() {
+  return !!sessionId
 }

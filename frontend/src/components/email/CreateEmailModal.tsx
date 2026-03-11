@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Mail, Loader2, ChevronDown } from 'lucide-react'
-import { api, type HMEEmail } from '@/api/client'
+import { api, getErrorMessage, type HMEEmail } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import Modal from '@/components/ui/Modal'
 import Button from '@/components/ui/Button'
+import { useForwardEmailOptions } from '@/hooks/useForwardEmailOptions'
 
 interface CreateEmailModalProps {
   open: boolean
@@ -20,16 +21,12 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
   const queryClient = useQueryClient()
 
   // Fetch forward email options from Apple's actual forward email API
-  const { data: forwardEmails, isLoading: loadingForward } = useQuery({
-    queryKey: ['forward-email-options', accountId],
-    queryFn: async () => {
-      const res = await api.getForwardEmailOptions(accountId)
-      if (!res.success) throw new Error(res.error)
-      return res.data?.forwardToOptions?.availableEmails?.map(e => e.address) || []
-    },
-    enabled: open,
-    staleTime: 60_000,
-  })
+  const {
+    data: forwardEmailData,
+    isLoading: loadingForward,
+    isError: forwardEmailQueryError,
+    error: forwardEmailError,
+  } = useForwardEmailOptions(accountId, open)
 
   // Reset form when modal opens
   useEffect(() => {
@@ -44,10 +41,10 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
 
   // Auto-select first forward email after data loads (only when forwardTo is empty)
   useEffect(() => {
-    if (open && forwardEmails?.length && forwardTo === '') {
-      setForwardTo(forwardEmails[0])
+    if (open && forwardEmailData?.availableEmails.length && forwardTo === '') {
+      setForwardTo(forwardEmailData.availableEmails[0].address)
     }
-  }, [open, forwardEmails, forwardTo])
+  }, [open, forwardEmailData, forwardTo])
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -62,7 +59,7 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
         toast.error(res.error || '创建失败')
       }
     },
-    onError: () => toast.error('网络错误'),
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   const handleClose = () => {
@@ -81,7 +78,7 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
   }
 
   return (
-    <Modal open={open} onClose={handleClose}>
+    <Modal open={open} onClose={handleClose} disableClose={mutation.isPending}>
       <div className="p-6">
         {/* Header */}
         <div className="flex items-center gap-3 mb-5">
@@ -126,24 +123,28 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
                     <Loader2 className="w-4 h-4 animate-spin" />
                     加载转发邮箱...
                   </div>
-                ) : forwardEmails && forwardEmails.length > 0 ? (
+                ) : forwardEmailData?.availableEmails.length ? (
                   <div className="relative">
                     <select
                       value={forwardTo}
                       onChange={(e) => setForwardTo(e.target.value)}
                       className="input appearance-none pr-9"
                     >
-                      {forwardEmails.map((email) => (
-                        <option key={email} value={email}>
-                          {email}
+                      {forwardEmailData.availableEmails.map((emailOption) => (
+                        <option key={emailOption.id} value={emailOption.address}>
+                          {emailOption.address}
                         </option>
                       ))}
                     </select>
                     <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
                   </div>
+                ) : forwardEmailQueryError ? (
+                  <p className="text-sm text-red-500 px-3 py-2.5 border border-red-100 rounded-xl bg-red-50">
+                    {getErrorMessage(forwardEmailError, '获取转发邮箱失败')}
+                  </p>
                 ) : (
                   <p className="text-sm text-gray-400 px-3 py-2.5 border border-gray-200 rounded-xl bg-gray-50">
-                    未获取到转发邮箱（将使用默认）
+                    {forwardEmailData?.needsLogin ? '请先登录账户后再创建' : '未获取到转发邮箱（将使用默认）'}
                   </p>
                 )}
               </div>
@@ -151,12 +152,13 @@ export default function CreateEmailModal({ open, onClose, accountId }: CreateEma
 
             {/* Actions */}
             <div className="flex gap-3 mt-6">
-              <Button variant="secondary" onClick={handleClose} className="flex-1">
+              <Button variant="secondary" onClick={handleClose} disabled={mutation.isPending} className="flex-1">
                 取消
               </Button>
               <Button
                 onClick={() => mutation.mutate()}
                 loading={mutation.isPending}
+                disabled={forwardEmailData?.needsLogin}
                 className="flex-1"
                 icon={<Mail className="w-4 h-4" />}
               >

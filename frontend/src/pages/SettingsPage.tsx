@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/api/client'
+import { api, getErrorMessage, unwrapResponse } from '@/api/client'
 import { useAuthStore } from '@/stores/authStore'
 import { toast } from '@/stores/toastStore'
 import { Lock, User, Activity, CheckCircle2, XCircle, Globe } from 'lucide-react'
@@ -14,14 +14,18 @@ export default function SettingsPage() {
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyError, setProxyError] = useState('')
 
-  const { data: settingsData } = useQuery({
+  const {
+    data: settingsData,
+    isError: settingsQueryError,
+    error: settingsError,
+  } = useQuery({
     queryKey: ['systemSettings'],
-    queryFn: () => api.getSystemSettings(),
+    queryFn: async () => unwrapResponse(await api.getSystemSettings(), '获取系统设置失败'),
   })
 
   useEffect(() => {
-    if (settingsData?.data?.proxyUrl !== undefined) {
-      setProxyUrl(settingsData.data.proxyUrl)
+    if (settingsData?.proxyUrl !== undefined) {
+      setProxyUrl(settingsData.proxyUrl)
     }
   }, [settingsData])
 
@@ -36,7 +40,7 @@ export default function SettingsPage() {
         setProxyError(res.error || '保存失败')
       }
     },
-    onError: () => setProxyError('网络错误'),
+    onError: (mutationError) => setProxyError(getErrorMessage(mutationError)),
   })
 
   const handleProxySubmit = (e: React.FormEvent) => {
@@ -64,7 +68,7 @@ export default function SettingsPage() {
         setPwdError(res.error || '修改失败')
       }
     },
-    onError: () => setPwdError('网络错误'),
+    onError: (mutationError) => setPwdError(getErrorMessage(mutationError)),
   })
 
   const handlePasswordSubmit = (e: React.FormEvent) => {
@@ -82,13 +86,18 @@ export default function SettingsPage() {
   }
 
   // ---- Health Check ----
-  const { data: healthData, isLoading: healthLoading } = useQuery({
+  const {
+    data: healthData,
+    isLoading: healthLoading,
+    isError: healthQueryError,
+    error: healthError,
+  } = useQuery({
     queryKey: ['health'],
-    queryFn: () => api.health(),
+    queryFn: async () => unwrapResponse(await api.health(), '获取系统状态失败'),
     refetchInterval: 30000,
   })
 
-  const isHealthy = healthData?.success === true
+  const isHealthy = healthData?.status === 'ok'
 
   return (
     <div className="animate-fade-in">
@@ -123,6 +132,12 @@ export default function SettingsPage() {
             {proxyError && (
               <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm animate-fade-in">
                 {proxyError}
+              </div>
+            )}
+
+            {settingsQueryError && (
+              <div className="p-3 bg-yellow-50 border border-yellow-100 rounded-xl text-yellow-700 text-sm animate-fade-in">
+                当前系统设置读取失败：{getErrorMessage(settingsError, '获取系统设置失败')}
               </div>
             )}
 
@@ -235,6 +250,10 @@ export default function SettingsPage() {
                 <span className="text-sm text-gray-500">API 服务</span>
                 {healthLoading ? (
                   <span className="text-sm text-gray-400">检测中...</span>
+                ) : healthQueryError ? (
+                  <span className="inline-flex items-center gap-1.5 text-sm font-medium text-yellow-700">
+                    <XCircle className="w-4 h-4" /> {getErrorMessage(healthError, '获取系统状态失败')}
+                  </span>
                 ) : isHealthy ? (
                   <span className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-600">
                     <CheckCircle2 className="w-4 h-4" /> 正常

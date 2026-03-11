@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api, type AppleAccount, type PhoneNumber } from '@/api/client'
+import { api, getErrorMessage, unwrapResponse, type AppleAccount, type PhoneNumber } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
   Plus, Trash2, LogIn, Mail, RefreshCw, Search,
@@ -15,70 +15,75 @@ import AccountHMEPanel from '@/components/account/AccountHMEPanel'
 import BatchImportModal from '@/components/account/BatchImportModal'
 import Pagination from '@/components/ui/Pagination'
 import { cn } from '@/lib/cn'
+import { usePersistedPageSize } from '@/hooks/usePersistedPageSize'
 
 export default function AccountsPage() {
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = usePersistedPageSize('accounts-page-size')
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
   // undefined = closed, null = add mode, AppleAccount = edit mode
   const [formAccount, setFormAccount] = useState<AppleAccount | null | undefined>(undefined)
   const [deleteTarget, setDeleteTarget] = useState<AppleAccount | null>(null)
-  const [selectedAccount, setSelectedAccount] = useState<AppleAccount | null>(null)
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
   const [twoFAAccountId, setTwoFAAccountId] = useState<number | null>(null)
   const [twoFAPhones, setTwoFAPhones] = useState<PhoneNumber[]>([])
   const [batchImportOpen, setBatchImportOpen] = useState(false)
 
   // ---- Data ----
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ['accounts', page, search],
-    queryFn: () => api.listAccounts(page, 20, search),
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: ['accounts', page, pageSize, search],
+    queryFn: async () => unwrapResponse(await api.listAccounts(page, pageSize, search), '获取账户列表失败'),
   })
 
-  const accounts = data?.data?.list || []
-  const total = data?.data?.total || 0
-  const pageSize = data?.data?.pageSize || 20
+  const accounts = data?.list || []
+  const total = data?.total || 0
   const totalPages = Math.ceil(total / pageSize)
+  const selectedAccount =
+    selectedAccountId === null ? null : accounts.find((account) => account.id === selectedAccountId) ?? null
 
   // 全局统计数据（不受分页/搜索影响）
-  const { data: statsData } = useQuery({
+  const {
+    data: statsData,
+    isError: statsError,
+    error: statsQueryError,
+  } = useQuery({
     queryKey: ['admin-stats'],
-    queryFn: () => api.getStats(),
+    queryFn: async () => unwrapResponse(await api.getStats(), '获取统计信息失败'),
   })
   const stats = {
-    totalAccounts: statsData?.data?.totalAccounts ?? 0,
-    activeAccounts: statsData?.data?.activeAccounts ?? 0,
-    errorAccounts: statsData?.data?.errorAccounts ?? 0,
-    totalHME: statsData?.data?.totalHME ?? 0,
+    totalAccounts: statsData?.totalAccounts ?? 0,
+    activeAccounts: statsData?.activeAccounts ?? 0,
+    errorAccounts: statsData?.errorAccounts ?? 0,
+    totalHME: statsData?.totalHME ?? 0,
   }
 
   // ---- Mutations ----
   const loginMutation = useMutation({
     mutationFn: (id: number) => api.loginAppleAccount(id),
     onSuccess: async (res, id) => {
-      console.log('[Login] Response:', JSON.stringify(res, null, 2))
       if (!res.success) {
         toast.error(res.error || '登录失败')
         return
       }
       if (res.data?.requires2fa) {
-        console.log('[Login] phoneNumbers:', res.data?.phoneNumbers)
         setTwoFAAccountId(id)
         setTwoFAPhones(res.data?.phoneNumbers || [])
         queryClient.invalidateQueries({ queryKey: ['accounts'] })
       } else {
         toast.success('Apple 账户登录成功')
-        // 先刷新数据，再获取最新账户信息进入详情页
+        setSelectedAccountId(id)
         await queryClient.invalidateQueries({ queryKey: ['accounts'] })
-        // 从最新缓存中获取账户数据
-        const freshData = queryClient.getQueryData<{ data?: { list: AppleAccount[] } }>(['accounts', page, search])
-        const freshAccount = freshData?.data?.list?.find((a) => a.id === id)
-        if (freshAccount) {
-          setSelectedAccount(freshAccount)
-        }
       }
     },
-    onError: () => toast.error('网络错误'),
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   const deleteMutation = useMutation({
@@ -92,15 +97,39 @@ export default function AccountsPage() {
       }
       setDeleteTarget(null)
     },
-    onError: () => {
-      toast.error('网络错误')
+    onError: (mutationError) => {
+      toast.error(getErrorMessage(mutationError))
       setDeleteTarget(null)
     },
   })
 
   // ---- HME detail view ----
-  if (selectedAccount) {
-    return <AccountHMEPanel account={selectedAccount} onBack={() => setSelectedAccount(null)} />
+  if (selectedAccountId !== null) {
+    if (!selectedAccount) {
+      return (
+        <div className="animate-fade-in">
+          <div className="bg-white rounded-2xl border border-red-100 p-6 text-center">
+            <AlertCircle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+            <p className="text-sm font-medium text-gray-900">
+              {isLoading ? '正在同步账户详情...' : '账户详情已失效，请返回列表重试'}
+            </p>
+            {!isLoading && isError && (
+              <p className="text-sm text-red-500 mt-2">{getErrorMessage(error, '获取账户列表失败')}</p>
+            )}
+            <div className="mt-4 flex justify-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => refetch()}>
+                重新加载
+              </Button>
+              <Button size="sm" onClick={() => setSelectedAccountId(null)}>
+                返回列表
+              </Button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    return <AccountHMEPanel account={selectedAccount} onBack={() => setSelectedAccountId(null)} />
   }
 
   // 解析账户的电话号码
@@ -108,7 +137,7 @@ export default function AccountsPage() {
     try {
       const phones = phoneNumbers ? JSON.parse(phoneNumbers) : []
       if (!Array.isArray(phones)) return []
-      return phones.map((p: { fullNumberWithCountryPrefix?: string; numberWithDialCode?: string }) =>
+      return phones.map((p: PhoneNumber) =>
         p.fullNumberWithCountryPrefix || p.numberWithDialCode || ''
       ).filter(Boolean)
     } catch {
@@ -150,6 +179,12 @@ export default function AccountsPage() {
           </Button>
         </div>
       </div>
+
+      {statsError && (
+        <div className="mb-4 rounded-2xl border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-700">
+          统计数据加载失败：{getErrorMessage(statsQueryError, '获取统计信息失败')}
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 mb-6">
@@ -259,8 +294,14 @@ export default function AccountsPage() {
         </div>
       )}
 
+      {!isLoading && isError && (
+        <div className="mb-5 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+          账户列表加载失败：{getErrorMessage(error, '获取账户列表失败')}
+        </div>
+      )}
+
       {/* Empty */}
-      {!isLoading && accounts.length === 0 && (
+      {!isLoading && !isError && accounts.length === 0 && (
         <div className="text-center py-20 bg-white rounded-2xl border border-gray-100">
           <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Mail className="w-8 h-8 text-gray-300" />
@@ -294,7 +335,7 @@ export default function AccountsPage() {
                   {/* Card Header */}
                   <div className="flex items-start justify-between mb-3">
                     <button
-                      onClick={() => setSelectedAccount(account)}
+                      onClick={() => setSelectedAccountId(account.id)}
                       className="flex items-center gap-3 text-left flex-1 min-w-0 hover:opacity-80 transition-opacity"
                     >
                       <div className={cn(
@@ -407,7 +448,7 @@ export default function AccountsPage() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => setSelectedAccount(account)}
+                      onClick={() => setSelectedAccountId(account.id)}
                       icon={<Eye className="w-3.5 h-3.5" />}
                       className="flex-shrink-0"
                     >
@@ -447,7 +488,7 @@ export default function AccountsPage() {
           </div>
 
           {/* Pagination */}
-          {totalPages > 1 && (
+          {total > 0 && (
             <div className="mt-6">
               <Pagination
                 currentPage={page}
@@ -455,6 +496,10 @@ export default function AccountsPage() {
                 totalItems={total}
                 pageSize={pageSize}
                 onPageChange={setPage}
+                onPageSizeChange={(size) => {
+                  setPageSize(size)
+                  setPage(1)
+                }}
               />
             </div>
           )}
@@ -478,9 +523,12 @@ export default function AccountsPage() {
         phoneNumbers={twoFAPhones}
         onClose={() => setTwoFAAccountId(null)}
         onSuccess={async () => {
+          const accountId = twoFAAccountId
           setTwoFAAccountId(null)
           toast.success('Apple 账户登录成功')
-          // Refresh accounts list to get updated data
+          if (accountId !== null) {
+            setSelectedAccountId(accountId)
+          }
           await queryClient.invalidateQueries({ queryKey: ['accounts'] })
         }}
       />

@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type HMEWithAccount } from '@/api/client'
+import { api, getErrorMessage, unwrapResponse, type HMEWithAccount } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
   Mail, Search, Copy, Check, Download,
@@ -9,21 +9,28 @@ import {
 import Button from '@/components/ui/Button'
 import Pagination from '@/components/ui/Pagination'
 import { cn } from '@/lib/cn'
+import { downloadCsv } from '@/lib/csv'
+import { usePersistedPageSize } from '@/hooks/usePersistedPageSize'
 
 export default function EmailsPage() {
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
+  const [pageSize, setPageSize] = usePersistedPageSize('emails-page-size')
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
   const [copiedId, setCopiedId] = useState<number | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+  } = useQuery({
     queryKey: ['all-hme', page, pageSize, search],
-    queryFn: () => api.listAllHME(page, pageSize, search),
+    queryFn: async () => unwrapResponse(await api.listAllHME(page, pageSize, search), '获取邮箱列表失败'),
   })
 
-  const list = data?.data?.list || []
-  const total = data?.data?.total || 0
+  const list = data?.list || []
+  const total = data?.total || 0
   const totalPages = Math.ceil(total / pageSize)
 
   const handleSearch = (e: React.FormEvent) => {
@@ -56,22 +63,18 @@ export default function EmailsPage() {
 
   const handleExport = useCallback(() => {
     if (!list.length) return
-    const esc = (v: string) =>
-      v.includes(',') || v.includes('"') ? `"${v.replace(/"/g, '""')}"` : v
-    const csv = [
-      'Email,Label,Account,ForwardTo,Active,CreatedAt',
-      ...list.map(
-        (e) =>
-          `${esc(e.emailAddress)},${esc(e.label)},${esc(e.appleId)},${esc(e.forwardToEmail)},${e.active},${e.createdAt}`,
-      ),
-    ].join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `hme-page${page}-${new Date().toISOString().slice(0, 10)}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    downloadCsv(
+      `hme-page${page}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['Email', 'Label', 'Account', 'ForwardTo', 'Active', 'CreatedAt'],
+      list.map((email) => [
+        email.emailAddress,
+        email.label,
+        email.appleId,
+        email.forwardToEmail,
+        email.active,
+        email.createdAt,
+      ]),
+    )
     toast.success(`已导出当前页 ${list.length} 条记录（共 ${total} 条）`)
   }, [list, total, page])
 
@@ -120,8 +123,14 @@ export default function EmailsPage() {
         </div>
       )}
 
+      {!isLoading && isError && (
+        <div className="mb-5 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+          邮箱列表加载失败：{getErrorMessage(error, '获取邮箱列表失败')}
+        </div>
+      )}
+
       {/* Empty */}
-      {!isLoading && list.length === 0 && (
+      {!isLoading && !isError && list.length === 0 && (
         <div className="text-center py-20">
           <Mail className="w-12 h-12 text-gray-300 mx-auto mb-3" />
           <p className="text-gray-500 font-medium">
@@ -134,7 +143,7 @@ export default function EmailsPage() {
       )}
 
       {/* Table */}
-      {!isLoading && list.length > 0 && (
+      {!isLoading && !isError && list.length > 0 && (
         <>
           <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 overflow-hidden">
             <table className="min-w-full">

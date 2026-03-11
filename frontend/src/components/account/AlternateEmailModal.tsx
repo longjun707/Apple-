@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { api } from '@/api/client'
+import { api, getErrorMessage } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import Modal from '@/components/ui/Modal'
 import Button from '@/components/ui/Button'
@@ -23,52 +23,73 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
   const [error, setError] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const codeRef = useRef<HTMLInputElement>(null)
+  const focusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const successTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const normalizedEmail = email.trim().toLowerCase()
+
+  const clearPendingTimeouts = () => {
+    if (focusTimeoutRef.current) {
+      clearTimeout(focusTimeoutRef.current)
+      focusTimeoutRef.current = null
+    }
+    if (successTimeoutRef.current) {
+      clearTimeout(successTimeoutRef.current)
+      successTimeoutRef.current = null
+    }
+  }
 
   // Reset state when modal opens/closes
   useEffect(() => {
     if (open) {
+      clearPendingTimeouts()
+      sendMutation.reset()
+      verifyMutation.reset()
       setStep('input')
       setEmail('')
       setCode('')
       setVerificationId('')
       setError('')
-      setTimeout(() => inputRef.current?.focus(), 100)
+      focusTimeoutRef.current = setTimeout(() => inputRef.current?.focus(), 100)
     }
+    return clearPendingTimeouts
   }, [open])
 
   // Focus code input when moving to verify step
   useEffect(() => {
     if (step === 'verify') {
-      setTimeout(() => codeRef.current?.focus(), 100)
+      if (focusTimeoutRef.current) {
+        clearTimeout(focusTimeoutRef.current)
+      }
+      focusTimeoutRef.current = setTimeout(() => codeRef.current?.focus(), 100)
     }
   }, [step])
 
   // Send verification code
   const sendMutation = useMutation({
-    mutationFn: () => api.sendAlternateEmailVerification(accountId!, email),
+    mutationFn: () => api.sendAlternateEmailVerification(accountId!, normalizedEmail),
     onSuccess: (res) => {
       if (res.success && res.data) {
         setVerificationId(res.data.verificationId)
         setStep('verify')
         setError('')
-        toast.success(`验证码已发送到 ${email}`)
+        toast.success(`验证码已发送到 ${normalizedEmail}`)
       } else {
         setError(res.error || '发送验证码失败')
       }
     },
-    onError: () => setError('网络错误，请重试'),
+    onError: (mutationError) => setError(getErrorMessage(mutationError, '发送验证码失败')),
   })
 
   // Verify code
   const verifyMutation = useMutation({
-    mutationFn: () => api.verifyAlternateEmail(accountId!, email, verificationId, code),
+    mutationFn: () => api.verifyAlternateEmail(accountId!, normalizedEmail, verificationId, code),
     onSuccess: (res) => {
       if (res.success) {
         setStep('success')
         setError('')
         toast.success('备用邮箱添加成功')
-        // Auto close after 1.5s
-        setTimeout(() => {
+        clearPendingTimeouts()
+        successTimeoutRef.current = setTimeout(() => {
           onSuccess()
           onClose()
         }, 1500)
@@ -76,12 +97,23 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
         setError(res.error || '验证码错误')
       }
     },
-    onError: () => setError('验证失败，请重试'),
+    onError: (mutationError) => setError(getErrorMessage(mutationError, '验证失败，请重试')),
   })
+
+  const isBusy = sendMutation.isPending || verifyMutation.isPending
+
+  const handleClose = () => {
+    if (isBusy || step === 'success') return
+    clearPendingTimeouts()
+    sendMutation.reset()
+    verifyMutation.reset()
+    setError('')
+    onClose()
+  }
 
   const handleSendCode = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!accountId || !email) return
+    if (!accountId || !normalizedEmail) return
     setError('')
     sendMutation.mutate()
   }
@@ -94,12 +126,13 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
   }
 
   const handleResend = () => {
+    if (!accountId) return
     setError('')
     sendMutation.mutate()
   }
 
   return (
-    <Modal open={open} onClose={onClose}>
+    <Modal open={open} onClose={handleClose} disableClose={isBusy || step === 'success'}>
       <div className="p-6">
         {/* Header */}
         <div className="flex justify-center mb-5">
@@ -129,7 +162,10 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
                 ref={inputRef}
                 type="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value)
+                  setError('')
+                }}
                 className="input"
                 placeholder="name@example.com"
                 required
@@ -142,12 +178,12 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
               )}
 
               <div className="flex gap-3">
-                <Button type="button" variant="secondary" onClick={onClose} className="flex-1">
+                <Button type="button" variant="secondary" onClick={handleClose} disabled={isBusy} className="flex-1">
                   取消
                 </Button>
                 <Button
                   type="submit"
-                  disabled={!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)}
+                  disabled={!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)}
                   loading={sendMutation.isPending}
                   className="flex-1"
                   icon={<ArrowRight className="w-4 h-4" />}
@@ -175,7 +211,10 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
                 type="text"
                 inputMode="numeric"
                 value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                onChange={(e) => {
+                  setCode(e.target.value.replace(/\D/g, '').slice(0, 6))
+                  setError('')
+                }}
                 className="input text-center text-2xl tracking-[0.5em] font-mono"
                 placeholder="000000"
                 maxLength={6}
@@ -190,7 +229,16 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
               )}
 
               <div className="flex gap-3">
-                <Button type="button" variant="secondary" onClick={() => setStep('input')} className="flex-1">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    setStep('input')
+                    setError('')
+                  }}
+                  disabled={isBusy}
+                  className="flex-1"
+                >
                   返回
                 </Button>
                 <Button
@@ -206,7 +254,7 @@ export default function AlternateEmailModal({ open, accountId, onClose, onSucces
               <button
                 type="button"
                 onClick={handleResend}
-                disabled={sendMutation.isPending}
+                disabled={sendMutation.isPending || verifyMutation.isPending}
                 className="w-full text-sm text-apple-blue hover:text-blue-700 transition-colors disabled:opacity-50 py-2"
               >
                 {sendMutation.isPending ? '发送中...' : '重新发送验证码'}

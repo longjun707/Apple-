@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,20 @@ func saveAppleSession(accountID uint, auth *apple.AppleAuth) {
 	log.Printf("[Session] Saved Apple session for account %d (cookies_len=%d)", accountID, len(cookies))
 }
 
+// validateAndSaveAppleSession persists the session only if HME validation succeeds.
+// This avoids saving half-initialized sessions that will fail after server restart.
+func validateAndSaveAppleSession(accountID uint, hme *apple.HMEClient, reason string) {
+	if store.DB == nil || hme == nil {
+		return
+	}
+	ok, err := hme.ExtendSession()
+	if !ok {
+		log.Printf("[Session] Skip saving session for account %d after %s: HME validation failed: %v", accountID, reason, err)
+		return
+	}
+	saveAppleSession(accountID, hme.GetAuth())
+}
+
 // fetchAndSaveAccountInfo fetches family sharing and profile info and saves to database
 func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 	if store.DB == nil || hme == nil {
@@ -112,7 +127,7 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 		if profileResp.Country != "" {
 			updates["country"] = profileResp.Country
 		}
-	// Always update alternate_emails (clear stale data when all emails are removed)
+		// Always update alternate_emails (clear stale data when all emails are removed)
 		altEmails := profileResp.AlternateEmails
 		if altEmails == nil {
 			altEmails = []string{}
@@ -181,26 +196,89 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 // maxSessionAge is the maximum age for a restored Apple session (7 days)
 const maxSessionAge = 7 * 24 * time.Hour
 
+func sanitizeURLForLog(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid-url>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+func extractProxyAddrFromAPIResponse(body []byte) string {
+	var result struct {
+		Code    int         `json:"code"`
+		Status  int         `json:"status"`
+		Message string      `json:"message"`
+		Data    interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return ""
+	}
+	switch data := result.Data.(type) {
+	case string:
+		return strings.TrimSpace(data)
+	case []interface{}:
+		if len(data) > 0 {
+			if first, ok := data[0].(string); ok {
+				return strings.TrimSpace(first)
+			}
+			if firstMap, ok := data[0].(map[string]interface{}); ok {
+				if proxy, ok := firstMap["proxy"].(string); ok {
+					return strings.TrimSpace(proxy)
+				}
+				if addr, ok := firstMap["addr"].(string); ok {
+					return strings.TrimSpace(addr)
+				}
+				host, hostOK := firstMap["host"].(string)
+				port, portOK := firstMap["port"]
+				if hostOK && portOK {
+					return fmt.Sprintf("%s:%v", strings.TrimSpace(host), port)
+				}
+			}
+		}
+	case map[string]interface{}:
+		if proxy, ok := data["proxy"].(string); ok {
+			return strings.TrimSpace(proxy)
+		}
+		if addr, ok := data["addr"].(string); ok {
+			return strings.TrimSpace(addr)
+		}
+		host, hostOK := data["host"].(string)
+		port, portOK := data["port"]
+		if hostOK && portOK {
+			return fmt.Sprintf("%s:%v", strings.TrimSpace(host), port)
+		}
+	}
+	return ""
+}
+
 // getProxyURL gets the proxy URL from settings
 // If it's an extraction API URL, fetch the real proxy first
 func getProxyURL() string {
 	if store.DB == nil {
 		return ""
 	}
-	
+
 	proxyConfig, _ := store.GetSetting("proxy_url")
 	if proxyConfig == "" {
 		return ""
 	}
-	
+
 	// Check if this is an extraction API (must contain "extract" in path, not just any /api/ URL)
 	// Direct proxy URLs typically start with http:// or socks:// followed by host:port
 	isExtractionAPI := strings.Contains(proxyConfig, "extract") ||
 		(strings.Contains(proxyConfig, "/api/") && !strings.HasPrefix(proxyConfig, "http://") && !strings.HasPrefix(proxyConfig, "socks"))
 	if isExtractionAPI {
 		// It's an extraction API, fetch the real proxy
-		log.Printf("[Proxy] Fetching proxy from API: %s", proxyConfig)
-		
+		log.Printf("[Proxy] Fetching proxy from API: %s", sanitizeURLForLog(proxyConfig))
+
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Get(proxyConfig)
 		if err != nil {
@@ -208,49 +286,61 @@ func getProxyURL() string {
 			return ""
 		}
 		defer resp.Body.Close()
-		
+
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("[Proxy] Failed to read proxy response: %v", err)
 			return ""
 		}
-		
+
 		proxyAddr := strings.TrimSpace(string(body))
-		log.Printf("[Proxy] Got proxy address: %s", proxyAddr)
-		
+		if strings.HasPrefix(proxyAddr, "{") || strings.HasPrefix(proxyAddr, "[") {
+			if extracted := extractProxyAddrFromAPIResponse(body); extracted != "" {
+				proxyAddr = extracted
+			} else {
+				log.Printf("[Proxy] Extraction API returned no usable proxy")
+				return ""
+			}
+		}
+
 		// If the response doesn't have a scheme, add http://
 		if proxyAddr != "" && !strings.HasPrefix(proxyAddr, "http") && !strings.HasPrefix(proxyAddr, "socks") {
 			proxyAddr = "http://" + proxyAddr
 		}
-		
+		log.Printf("[Proxy] Got proxy address: %s", sanitizeURLForLog(proxyAddr))
+
 		return proxyAddr
 	}
-	
+
 	// Direct proxy URL
 	return proxyConfig
 }
 
 // ensureAppleSession checks if Apple session is active for the account, tries to restore from DB if not
-func ensureAppleSession(session *SessionState, accountID uint) bool {
+func ensureAppleSession(session *SessionState, accountID uint) *AppleSessionState {
 	if accountID == 0 {
-		return false
+		return nil
 	}
 	// Already active in memory
-	if session.HME != nil && session.AccountID == accountID && session.Auth != nil && session.Auth.IsAuthenticated() {
-		return true
+	if appleSession, ok := session.getAppleSession(accountID); ok &&
+		appleSession.HME != nil &&
+		appleSession.Auth != nil &&
+		appleSession.Auth.IsAuthenticated() {
+		return appleSession
 	}
 	// Try restore from database
 	if store.DB == nil {
-		return false
+		return nil
 	}
 	account, err := store.NewAccountRepo().FindByID(accountID)
 	if err != nil || account.SessionToken == "" {
-		return false
+		return nil
 	}
 	// Reject stale sessions
 	if account.SessionSavedAt == nil || time.Since(*account.SessionSavedAt) > maxSessionAge {
 		log.Printf("[Session] Session for account %d is too old, skipping restore", accountID)
-		return false
+		session.clearAppleSession(accountID)
+		return nil
 	}
 	log.Printf("[Session] Restoring session for account %d...", accountID)
 	auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
@@ -265,19 +355,16 @@ func ensureAppleSession(session *SessionState, accountID uint) bool {
 		log.Printf("[Session] Session for account %d is invalid: %v", accountID, err)
 		// Clear invalid session from database
 		go clearInvalidSession(accountID)
-		return false
+		session.clearAppleSession(accountID)
+		return nil
 	}
+	appleSession := session.setAppleSession(accountID, account.AppleID, auth, hme)
 
-	session.Auth = auth
-	session.HME = hme
-	session.AccountID = accountID
-	session.AppleID = account.AppleID
-	
 	// Save updated session (may have new cookies from ExtendSession)
-	go saveAppleSession(accountID, auth)
-	
+	saveAppleSession(accountID, auth)
+
 	log.Printf("[Session] Restored and validated Apple session for account %d", accountID)
-	return true
+	return appleSession
 }
 
 // AdminLogin handles admin login
@@ -541,7 +628,8 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
-
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 	// Get account from database
 	var account store.Account
 	if err := store.DB.First(&account, id).Error; err != nil {
@@ -558,7 +646,7 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 
 	// Get proxy from settings
 	proxyURL := getProxyURL()
-	
+
 	// Create Apple auth client (with proxy if configured)
 	var auth *apple.AppleAuth
 	if proxyURL != "" {
@@ -588,7 +676,12 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 
 	if result.Requires2FA {
 		updates["last_error"] = "需要2FA验证"
-		
+		updates["session_token"] = ""
+		updates["session_scnt"] = ""
+		updates["session_id"] = ""
+		updates["session_cookies"] = ""
+		updates["session_saved_at"] = nil
+
 		// Save phone numbers to database (from 2FA trusted phones)
 		if len(result.PhoneNumbers) > 0 {
 			phonesJSON, _ := json.Marshal(result.PhoneNumbers)
@@ -597,14 +690,11 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 		} else {
 			log.Printf("[Login] No trusted phone numbers returned for account %d", id)
 		}
-		
+
 		store.DB.Model(&account).Updates(updates)
 
 		// Store auth client for 2FA
-		session.Auth = auth
-		session.HME = apple.NewHMEClient(auth)
-		session.AccountID = uint(id)
-		session.AppleID = account.AppleID
+		session.setAppleSession(uint(id), account.AppleID, auth, apple.NewHMEClient(auth))
 
 		c.JSON(http.StatusOK, APIResponse{
 			Success: true,
@@ -623,18 +713,9 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 	store.DB.Model(&account).Updates(updates)
 
 	// Store auth for HME operations
-	session.Auth = auth
-	session.HME = apple.NewHMEClient(auth)
-	session.AccountID = uint(id)
-	session.AppleID = account.AppleID
-
-	// Persist session to database — export session data before goroutine to avoid race
-	token, scnt, sessID, cookies := auth.ExportSessionData()
-	go func() {
-		if store.DB != nil && token != "" {
-			store.NewAccountRepo().SaveSession(uint(id), token, scnt, sessID, cookies)
-		}
-	}()
+	appleSession := session.setAppleSession(uint(id), account.AppleID, auth, apple.NewHMEClient(auth))
+	// Persist only after HME validation succeeds; otherwise restart/auto-HME will restore a broken session.
+	validateAndSaveAppleSession(uint(id), appleSession.HME, "login")
 
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
@@ -655,7 +736,10 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
-	if session.Auth == nil || session.AccountID != uint(id) {
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
+	appleSession, ok := session.getAppleSession(uint(id))
+	if !ok || appleSession.Auth == nil {
 		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -668,9 +752,9 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 
 	var err error
 	if req.Method == "sms" {
-		err = session.Auth.Verify2FASMS(req.PhoneID, req.Code)
+		err = appleSession.Auth.Verify2FASMS(req.PhoneID, req.Code)
 	} else {
-		err = session.Auth.Verify2FADevice(req.Code)
+		err = appleSession.Auth.Verify2FADevice(req.Code)
 	}
 
 	if err != nil {
@@ -680,19 +764,19 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 
 	// Log cookies immediately after 2FA (before Bootstrap)
 	log.Printf("[2FA] Cookies BEFORE Bootstrap:")
-	session.Auth.LogAllCookies()
+	appleSession.Auth.LogAllCookies()
 
 	// Create HME client and run Bootstrap to get all necessary cookies (aidsp, idclient, etc.)
-	if session.HME == nil {
-		session.HME = apple.NewHMEClient(session.Auth)
+	if appleSession.HME == nil {
+		appleSession.HME = apple.NewHMEClient(appleSession.Auth)
 	}
-	if err := session.HME.Bootstrap(); err != nil {
+	if err := appleSession.HME.Bootstrap(); err != nil {
 		log.Printf("[2FA] Bootstrap warning (session still valid): %v", err)
 	}
 
 	// CRITICAL: Call ListEmails to trigger aidsp cookie from Apple server
 	// Without this, auto HME creation will fail with 401
-	if _, err := session.HME.ListEmails(); err != nil {
+	if _, err := appleSession.HME.ListEmails(); err != nil {
 		log.Printf("[2FA] ListEmails warning (getting aidsp cookie): %v", err)
 	} else {
 		log.Printf("[2FA] ListEmails succeeded, aidsp cookie should be set")
@@ -700,22 +784,24 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 
 	// Log cookies after Bootstrap + ListEmails
 	log.Printf("[2FA] Cookies AFTER Bootstrap + ListEmails:")
-	session.Auth.LogAllCookies()
+	appleSession.Auth.LogAllCookies()
 
 	// Update account status
 	if store.DB != nil {
-		store.DB.Model(&store.Account{}).Where("id = ?", session.AccountID).Updates(map[string]interface{}{
+		store.DB.Model(&store.Account{}).Where("id = ?", appleSession.AccountID).Updates(map[string]interface{}{
 			"status":             1,
 			"last_error":         "",
 			"two_factor_enabled": true,
 		})
 	}
 
-	// Persist full Apple session (tokens + cookies) to database AFTER Bootstrap
-	saveAppleSession(session.AccountID, session.Auth)
+	// Fetch and save account info (profile + family) - this also enriches cookies/session state
+	fetchAndSaveAccountInfo(appleSession.AccountID, appleSession.HME)
 
-	// Fetch and save account info (profile + family) - run synchronously so data is ready for frontend
-	fetchAndSaveAccountInfo(session.AccountID, session.HME)
+	// Persist only AFTER the account session exchange/profile/family calls have enriched the session.
+	// The earlier Bootstrap/ListEmails call can still be 401 immediately after 2FA, but the later
+	// account.manage + TokenURL flow often completes the cookie set needed for HME restore.
+	validateAndSaveAppleSession(appleSession.AccountID, appleSession.HME, "2FA")
 
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]bool{"authenticated": true}})
 }
@@ -723,8 +809,16 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 // RequestSMSForAccount requests SMS 2FA code for an Apple account
 func (s *Server) RequestSMSForAccount(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.Auth == nil {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "请先登录Apple账户"})
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
+	appleSession, ok := session.getAppleSession(uint(id))
+	if !ok || appleSession.Auth == nil {
+		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
 
@@ -732,17 +826,18 @@ func (s *Server) RequestSMSForAccount(c *gin.Context) {
 		PhoneID int `json:"phoneId"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Printf("[RequestSMS] JSON bind error: %v", err)
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "参数错误"})
+		return
 	}
-	
+
 	log.Printf("[RequestSMS] phoneId=%d", req.PhoneID)
-	
+
 	if req.PhoneID == 0 {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请选择一个电话号码发送验证码"})
 		return
 	}
 
-	if err := session.Auth.RequestSMSCode(req.PhoneID); err != nil {
+	if err := appleSession.Auth.RequestSMSCode(req.PhoneID); err != nil {
 		c.JSON(http.StatusOK, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
@@ -793,6 +888,7 @@ func RefreshAllSessions() {
 	invalid := 0
 
 	for _, account := range accounts {
+		unlock := lockAppleAccount(account.ID)
 		log.Printf("[Session] Refreshing session for account %d (%s)...", account.ID, account.AppleID)
 
 		// Restore session
@@ -808,10 +904,25 @@ func RefreshAllSessions() {
 			saveAppleSession(account.ID, auth)
 			valid++
 		} else {
-			log.Printf("[Session] ✗ Account %d session invalid: %v", account.ID, err)
-			// Don't clear - let user re-login manually
+			errMsg := ""
+			if err != nil {
+				errMsg = err.Error()
+			}
+			isNetworkError := strings.Contains(errMsg, "timeout") ||
+				strings.Contains(errMsg, "deadline exceeded") ||
+				strings.Contains(errMsg, "connection refused") ||
+				strings.Contains(errMsg, "no such host") ||
+				strings.Contains(errMsg, "network is unreachable")
+			if isNetworkError {
+				log.Printf("[Session] ! Account %d session check skipped due to network error: %v", account.ID, err)
+			} else {
+				log.Printf("[Session] ✗ Account %d session invalid: %v", account.ID, err)
+				// Clear truly invalid sessions so UI/auto task won't keep treating them as restorable.
+				go clearInvalidSession(account.ID)
+			}
 			invalid++
 		}
+		unlock()
 	}
 
 	log.Printf("[Session] Session refresh complete: %d valid, %d invalid (of %d total)", valid, invalid, len(accounts))
@@ -839,20 +950,21 @@ func StartPeriodicSessionRefresh() {
 
 // AutoHMETaskStatus holds the current status of auto HME creation task
 type AutoHMETaskStatus struct {
-	mu                sync.RWMutex
-	Enabled           bool      `json:"enabled"`
-	Running           bool      `json:"running"`
-	IntervalMinutes   int       `json:"intervalMinutes"`
-	CountPerAccount   int       `json:"countPerAccount"`
-	LastRunTime       *time.Time `json:"lastRunTime"`
-	NextRunTime       *time.Time `json:"nextRunTime"`
-	CurrentAccount    string    `json:"currentAccount"`
-	CurrentProgress   int       `json:"currentProgress"`
-	TotalAccounts     int       `json:"totalAccounts"`
-	ProcessedAccounts int       `json:"processedAccounts"`
-	TotalCreated      int       `json:"totalCreated"`
-	TotalFailed       int       `json:"totalFailed"`
-	Logs              []AutoHMELogEntry `json:"logs"`
+	mu                  sync.RWMutex
+	Enabled             bool              `json:"enabled"`
+	Running             bool              `json:"running"`
+	IntervalMinutes     int               `json:"intervalMinutes"`
+	CountPerAccount     int               `json:"countPerAccount"`
+	LastRunTime         *time.Time        `json:"lastRunTime"`
+	NextRunTime         *time.Time        `json:"nextRunTime"`
+	CurrentAccount      string            `json:"currentAccount"`
+	CurrentAccountIndex int               `json:"currentAccountIndex"`
+	CurrentProgress     int               `json:"currentProgress"`
+	TotalAccounts       int               `json:"totalAccounts"`
+	ProcessedAccounts   int               `json:"processedAccounts"`
+	TotalCreated        int               `json:"totalCreated"`
+	TotalFailed         int               `json:"totalFailed"`
+	Logs                []AutoHMELogEntry `json:"logs"`
 }
 
 // AutoHMELogEntry represents a single log entry
@@ -937,19 +1049,19 @@ func getAccountForwardEmail(accountID uint) string {
 func addAutoHMELog(level, message string) {
 	autoHMEStatus.mu.Lock()
 	defer autoHMEStatus.mu.Unlock()
-	
+
 	entry := AutoHMELogEntry{
 		Time:    time.Now(),
 		Level:   level,
 		Message: message,
 	}
 	autoHMEStatus.Logs = append(autoHMEStatus.Logs, entry)
-	
+
 	// Keep only last N entries
 	if len(autoHMEStatus.Logs) > maxLogEntries {
 		autoHMEStatus.Logs = autoHMEStatus.Logs[len(autoHMEStatus.Logs)-maxLogEntries:]
 	}
-	
+
 	log.Printf("[AutoHME] %s", message)
 }
 
@@ -1024,8 +1136,10 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 	autoHMEStatus.LastRunTime = &now
 	autoHMEStatus.TotalCreated = 0
 	autoHMEStatus.TotalFailed = 0
+	autoHMEStatus.TotalAccounts = 0
 	autoHMEStatus.ProcessedAccounts = 0
 	autoHMEStatus.CurrentAccount = ""
+	autoHMEStatus.CurrentAccountIndex = 0
 	autoHMEStatus.CurrentProgress = 0
 	autoHMEStatus.mu.Unlock()
 
@@ -1033,6 +1147,7 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		autoHMEStatus.mu.Lock()
 		autoHMEStatus.Running = false
 		autoHMEStatus.CurrentAccount = ""
+		autoHMEStatus.CurrentAccountIndex = 0
 		autoHMEStatus.CurrentProgress = 0
 		autoHMEStatus.mu.Unlock()
 	}()
@@ -1062,9 +1177,11 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 	for idx, account := range accounts {
 		autoHMEStatus.mu.Lock()
 		autoHMEStatus.CurrentAccount = account.AppleID
+		autoHMEStatus.CurrentAccountIndex = idx + 1
 		autoHMEStatus.CurrentProgress = 0
 		autoHMEStatus.ProcessedAccounts = idx
 		autoHMEStatus.mu.Unlock()
+		unlock := lockAppleAccount(account.ID)
 
 		addAutoHMELog("info", fmt.Sprintf("开始处理账户 [%d/%d]: %s", idx+1, len(accounts), account.AppleID))
 		// Use direct connection (same as manual creation) - proxy often gets rate-limited
@@ -1085,18 +1202,29 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 				strings.Contains(errMsg, "connection refused") ||
 				strings.Contains(errMsg, "no such host") ||
 				strings.Contains(errMsg, "network is unreachable")
-			
+
 			if isNetworkError {
 				// Network error - don't clear session, just skip this account
 				addAutoHMELog("warning", fmt.Sprintf("账户 %s 网络超时，跳过本次执行: %v", account.AppleID, err))
+				autoHMEStatus.mu.Lock()
+				autoHMEStatus.ProcessedAccounts = idx + 1
+				autoHMEStatus.mu.Unlock()
+				unlock()
 				continue
 			}
 			// Auth error (401/403) - clear invalid session
 			addAutoHMELog("error", fmt.Sprintf("账户 %s 会话无效: %v，清理并跳过", account.AppleID, err))
 			go clearInvalidSession(account.ID)
+			autoHMEStatus.mu.Lock()
+			autoHMEStatus.ProcessedAccounts = idx + 1
+			autoHMEStatus.mu.Unlock()
+			unlock()
 			continue
 		}
 
+		// Persist the refreshed session immediately after ExtendSession succeeds.
+		// If the process exits during batch creation, we still keep the latest valid cookies/scnt in DB.
+		saveAppleSession(account.ID, auth)
 		// Use BatchCreateEmails (same as manual batch creation) for consistency
 		autoHMEStatus.mu.Lock()
 		autoHMEStatus.CurrentProgress = 0
@@ -1107,12 +1235,17 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 
 		// Look up the account's preferred forward email from existing HME records
 		forwardEmail := getAccountForwardEmail(account.ID)
+		baseTotalCreated := totalCreated
+		baseTotalFailed := totalFailed
 
 		// Progress callback for real-time updates
 		onProgress := func(created, failed, total int) {
 			autoHMEStatus.mu.Lock()
 			autoHMEStatus.CurrentProgress = created + failed
+			autoHMEStatus.TotalCreated = baseTotalCreated + created
+			autoHMEStatus.TotalFailed = baseTotalFailed + failed
 			autoHMEStatus.mu.Unlock()
+			_ = total
 		}
 
 		results, errs := hme.BatchCreateEmails(countPerAccount, labelPrefix, delayMs, forwardEmail, onProgress)
@@ -1176,6 +1309,8 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		totalFailed += failed
 
 		autoHMEStatus.mu.Lock()
+		autoHMEStatus.ProcessedAccounts = idx + 1
+		autoHMEStatus.CurrentProgress = created + failed
 		autoHMEStatus.TotalCreated = totalCreated
 		autoHMEStatus.TotalFailed = totalFailed
 		autoHMEStatus.mu.Unlock()
@@ -1186,16 +1321,14 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		// Skip remaining accounts — they'll all fail from the same IP.
 		if has403 && created == 0 {
 			addAutoHMELog("warning", "检测到连续 403 (IP 速率限制)，跳过剩余账户，等待下次执行")
+			unlock()
 			break
 		}
+		unlock()
 
 		// Delay between accounts to reduce rate-limit risk
 		time.Sleep(5 * time.Second)
 	}
-
-	autoHMEStatus.mu.Lock()
-	autoHMEStatus.ProcessedAccounts = len(accounts)
-	autoHMEStatus.mu.Unlock()
 
 	addAutoHMELog("success", fmt.Sprintf("定时任务完成: 共创建成功 %d 个，失败 %d 个", totalCreated, totalFailed))
 }
@@ -1220,19 +1353,20 @@ func (s *Server) GetAutoHMEStatus(c *gin.Context) {
 	// Read status fields under lock
 	autoHMEStatus.mu.RLock()
 	statusData := map[string]interface{}{
-		"enabled":           autoHMEStatus.Enabled,
-		"running":           autoHMEStatus.Running,
-		"intervalMinutes":   autoHMEStatus.IntervalMinutes,
-		"countPerAccount":   autoHMEStatus.CountPerAccount,
-		"lastRunTime":       autoHMEStatus.LastRunTime,
-		"nextRunTime":       autoHMEStatus.NextRunTime,
-		"currentAccount":    autoHMEStatus.CurrentAccount,
-		"currentProgress":   autoHMEStatus.CurrentProgress,
-		"totalAccounts":     autoHMEStatus.TotalAccounts,
-		"processedAccounts": autoHMEStatus.ProcessedAccounts,
-		"totalCreated":      autoHMEStatus.TotalCreated,
-		"totalFailed":       autoHMEStatus.TotalFailed,
-		"eligibleAccounts":  eligibleAccounts,
+		"enabled":             autoHMEStatus.Enabled,
+		"running":             autoHMEStatus.Running,
+		"intervalMinutes":     autoHMEStatus.IntervalMinutes,
+		"countPerAccount":     autoHMEStatus.CountPerAccount,
+		"lastRunTime":         autoHMEStatus.LastRunTime,
+		"nextRunTime":         autoHMEStatus.NextRunTime,
+		"currentAccount":      autoHMEStatus.CurrentAccount,
+		"currentAccountIndex": autoHMEStatus.CurrentAccountIndex,
+		"currentProgress":     autoHMEStatus.CurrentProgress,
+		"totalAccounts":       autoHMEStatus.TotalAccounts,
+		"processedAccounts":   autoHMEStatus.ProcessedAccounts,
+		"totalCreated":        autoHMEStatus.TotalCreated,
+		"totalFailed":         autoHMEStatus.TotalFailed,
+		"eligibleAccounts":    eligibleAccounts,
 	}
 	autoHMEStatus.mu.RUnlock()
 
@@ -1246,13 +1380,13 @@ func (s *Server) GetAutoHMEStatus(c *gin.Context) {
 func (s *Server) GetAutoHMELogs(c *gin.Context) {
 	autoHMEStatus.mu.RLock()
 	defer autoHMEStatus.mu.RUnlock()
-	
+
 	// Return logs in reverse order (newest first)
 	logs := make([]AutoHMELogEntry, len(autoHMEStatus.Logs))
 	for i, entry := range autoHMEStatus.Logs {
 		logs[len(autoHMEStatus.Logs)-1-i] = entry
 	}
-	
+
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data:    logs,
@@ -1349,11 +1483,13 @@ func (s *Server) GetAccountHME(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
 	// Try active session or restore from DB
 	var appleAPIError string
-	if ensureAppleSession(session, uint(id)) {
-		emails, err := session.HME.ListEmails()
+	if appleSession := ensureAppleSession(session, uint(id)); appleSession != nil {
+		emails, err := appleSession.HME.ListEmails()
 		if err != nil {
 			errStr := err.Error()
 			log.Printf("[GetAccountHME] Apple API error: %v", err)
@@ -1362,14 +1498,13 @@ func (s *Server) GetAccountHME(c *gin.Context) {
 			// If 401 error, session is invalid - clear it
 			if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
 				go clearInvalidSession(uint(id))
-				session.HME = nil
-				session.Auth = nil
+				session.clearAppleSession(uint(id))
 				log.Printf("[GetAccountHME] Session expired for account %d, cleared", id)
 			}
 		} else {
 			go syncHMEToDB(uint(id), emails)
 			// Save session after successful HME operation (Bootstrap may have added new cookies)
-			go saveAppleSession(uint(id), session.Auth)
+			saveAppleSession(uint(id), appleSession.Auth)
 			c.JSON(http.StatusOK, APIResponse{Success: true, Data: emails})
 			return
 		}
@@ -1462,8 +1597,10 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
-
-	if !ensureAppleSession(session, uint(id)) {
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -1473,14 +1610,14 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 		log.Printf("[CreateAccountHME] JSON bind error (using defaults): %v", err)
 	}
 
-	hme, err := session.HME.CreateEmail(req.Label, req.Note, req.ForwardToEmail)
+	hme, err := appleSession.HME.CreateEmail(req.Label, req.Note, req.ForwardToEmail)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
 
 	// Save session after successful HME creation (new cookies may have been set)
-	go saveAppleSession(uint(id), session.Auth)
+	saveAppleSession(uint(id), appleSession.Auth)
 
 	// Save to database
 	hmeRepo := store.NewHMERepo()
@@ -1513,11 +1650,13 @@ func (s *Server) DeleteAccountHME(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的参数"})
 		return
 	}
+	unlock := lockAppleAccount(uint(accountID))
+	defer unlock()
 
 	localOnly := false
 	// Try to delete from Apple if session is active (or can be restored)
-	if ensureAppleSession(session, uint(accountID)) {
-		if err := session.HME.DeleteEmail(hmeId); err != nil {
+	if appleSession := ensureAppleSession(session, uint(accountID)); appleSession != nil {
+		if err := appleSession.HME.DeleteEmail(hmeId); err != nil {
 			c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "Apple API 删除失败: " + err.Error()})
 			return
 		}
@@ -1687,13 +1826,14 @@ func (s *Server) GetAccountForwardEmails(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
-
-	if !ensureAppleSession(session, uint(id)) {
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
-
-	emails, err := session.HME.GetForwardEmails()
+	emails, err := appleSession.HME.GetForwardEmails()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -1711,8 +1851,10 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
-
-	if !ensureAppleSession(session, uint(id)) {
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -1730,10 +1872,10 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 		req.DelayMs = 1000
 	}
 
-	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail, nil)
+	results, errors := appleSession.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail, nil)
 
 	// Save session after batch creation (new cookies may have been set)
-	go saveAppleSession(uint(id), session.Auth)
+	saveAppleSession(uint(id), appleSession.Auth)
 
 	// Save to database
 	if len(results) > 0 {
@@ -1783,8 +1925,11 @@ func (s *Server) SendAlternateEmailVerification(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
-	if !ensureAppleSession(session, uint(id)) {
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -1797,7 +1942,7 @@ func (s *Server) SendAlternateEmailVerification(c *gin.Context) {
 		return
 	}
 
-	result, err := session.HME.SendAlternateEmailVerification(req.Email)
+	result, err := appleSession.HME.SendAlternateEmailVerification(req.Email)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -1822,8 +1967,11 @@ func (s *Server) VerifyAlternateEmail(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
-	if !ensureAppleSession(session, uint(id)) {
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -1838,18 +1986,15 @@ func (s *Server) VerifyAlternateEmail(c *gin.Context) {
 		return
 	}
 
-	result, err := session.HME.VerifyAlternateEmail(req.Email, req.VerificationID, req.Code)
+	result, err := appleSession.HME.VerifyAlternateEmail(req.Email, req.VerificationID, req.Code)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
 
-	// Update account's alternate emails in database
-	go func() {
-		if session.HME != nil {
-			fetchAndSaveAccountInfo(uint(id), session.HME)
-		}
-	}()
+	if appleSession.HME != nil {
+		fetchAndSaveAccountInfo(uint(id), appleSession.HME)
+	}
 
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
@@ -1869,16 +2014,18 @@ func (s *Server) RefreshAccountInfo(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
-	if !ensureAppleSession(session, uint(id)) {
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
 
-	// Fetch and save account info synchronously
-	fetchAndSaveAccountInfo(uint(id), session.HME)
+	fetchAndSaveAccountInfo(uint(id), appleSession.HME)
+	validateAndSaveAppleSession(uint(id), appleSession.HME, "refresh")
 
-	// Return updated account
 	account, err := store.NewAccountRepo().FindByID(uint(id))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "获取账户失败"})
@@ -1897,8 +2044,11 @@ func (s *Server) RemoveAlternateEmail(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
-	if !ensureAppleSession(session, uint(id)) {
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -1911,17 +2061,14 @@ func (s *Server) RemoveAlternateEmail(c *gin.Context) {
 		return
 	}
 
-	if err := session.HME.RemoveAlternateEmail(req.Email); err != nil {
+	if err := appleSession.HME.RemoveAlternateEmail(req.Email); err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
 
-	// Update account's alternate emails in database
-	go func() {
-		if session.HME != nil {
-			fetchAndSaveAccountInfo(uint(id), session.HME)
-		}
-	}()
+	if appleSession.HME != nil {
+		fetchAndSaveAccountInfo(uint(id), appleSession.HME)
+	}
 
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }
@@ -1935,13 +2082,16 @@ func (s *Server) GetFamilyMembers(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
-	if !ensureAppleSession(session, uint(id)) {
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
 
-	familyResp, err := session.HME.GetFamilyMembers()
+	familyResp, err := appleSession.HME.GetFamilyMembers()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -1959,13 +2109,16 @@ func (s *Server) GetForwardEmailOptions(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
-	if !ensureAppleSession(session, uint(id)) {
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
 
-	result, err := session.HME.GetForwardEmailOptions()
+	result, err := appleSession.HME.GetForwardEmailOptions()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -1983,8 +2136,11 @@ func (s *Server) SetForwardEmail(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
 		return
 	}
+	unlock := lockAppleAccount(uint(id))
+	defer unlock()
 
-	if !ensureAppleSession(session, uint(id)) {
+	appleSession := ensureAppleSession(session, uint(id))
+	if appleSession == nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
@@ -1997,7 +2153,7 @@ func (s *Server) SetForwardEmail(c *gin.Context) {
 		return
 	}
 
-	if err := session.HME.SetForwardEmail(req.Email); err != nil {
+	if err := appleSession.HME.SetForwardEmail(req.Email); err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
@@ -2042,6 +2198,6 @@ func (s *Server) UpdateSystemSettings(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[Settings] Proxy URL updated: %s", req.ProxyURL)
+	log.Printf("[Settings] Proxy URL updated: %s", sanitizeURLForLog(req.ProxyURL))
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }

@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { api } from '@/api/client'
+import { api, getErrorMessage } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import Modal from '@/components/ui/Modal'
 import Button from '@/components/ui/Button'
@@ -18,8 +18,14 @@ interface ParsedAccount {
   remark?: string
 }
 
+interface ParsedAccountResult {
+  accounts: ParsedAccount[]
+  duplicateCount: number
+  invalidCount: number
+}
+
 /** Parse lines of text into account objects. Supports separators: ----, :, tab, space */
-function parseAccounts(text: string): ParsedAccount[] {
+function parseAccounts(text: string): ParsedAccountResult {
   const lines = text
     .split('\n')
     .map((l) => l.trim())
@@ -27,6 +33,8 @@ function parseAccounts(text: string): ParsedAccount[] {
 
   const results: ParsedAccount[] = []
   const seen = new Set<string>()
+  let duplicateCount = 0
+  let invalidCount = 0
 
   for (const line of lines) {
     let parts: string[] = []
@@ -45,14 +53,20 @@ function parseAccounts(text: string): ParsedAccount[] {
       const idx = line.indexOf(' ')
       parts = [line.slice(0, idx).trim(), line.slice(idx + 1).trim()]
     } else {
-      continue // Can't parse
+      invalidCount++
+      continue
     }
 
     const appleId = parts[0]?.toLowerCase()
     const password = parts[1]
-
-    if (!appleId || !password) continue
-    if (seen.has(appleId)) continue
+    if (!appleId || !password) {
+      invalidCount++
+      continue
+    }
+    if (seen.has(appleId)) {
+      duplicateCount++
+      continue
+    }
 
     seen.add(appleId)
     results.push({
@@ -61,8 +75,11 @@ function parseAccounts(text: string): ParsedAccount[] {
       remark: parts[2] || undefined,
     })
   }
-
-  return results
+  return {
+    accounts: results,
+    duplicateCount,
+    invalidCount,
+  }
 }
 
 export default function BatchImportModal({ open, onClose, onSuccess }: BatchImportModalProps) {
@@ -72,7 +89,7 @@ export default function BatchImportModal({ open, onClose, onSuccess }: BatchImpo
   const parsed = useMemo(() => parseAccounts(text), [text])
 
   const importMutation = useMutation({
-    mutationFn: () => api.batchCreateAccounts(parsed),
+    mutationFn: () => api.batchCreateAccounts(parsed.accounts),
     onSuccess: (res) => {
       if (res.success && res.data) {
         setResult(res.data)
@@ -83,26 +100,28 @@ export default function BatchImportModal({ open, onClose, onSuccess }: BatchImpo
         toast.error(res.error || '导入失败')
       }
     },
-    onError: () => toast.error('网络错误'),
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   const handleClose = useCallback(() => {
+    if (importMutation.isPending) return
     if (result && result.created > 0) {
       onSuccess()
     }
     setText('')
     setResult(null)
+    importMutation.reset()
     onClose()
-  }, [result, onClose, onSuccess])
+  }, [importMutation, result, onClose, onSuccess])
 
   const handleImport = () => {
-    if (parsed.length === 0) return
+    if (parsed.accounts.length === 0) return
     setResult(null)
     importMutation.mutate()
   }
 
   return (
-    <Modal open={open} onClose={handleClose} className="max-w-lg">
+    <Modal open={open} onClose={handleClose} disableClose={importMutation.isPending} className="max-w-lg">
       <div className="p-6">
         <div className="flex items-center gap-3 mb-5">
           <div className="w-10 h-10 rounded-full bg-purple-50 flex items-center justify-center">
@@ -139,31 +158,44 @@ export default function BatchImportModal({ open, onClose, onSuccess }: BatchImpo
 
             {/* Preview */}
             {text.trim() && (
-              <div className="mt-3 flex items-center gap-2 text-sm">
-                {parsed.length > 0 ? (
+              <div className="mt-3 space-y-1 text-sm">
+                {parsed.accounts.length > 0 ? (
                   <span className="text-green-600 font-medium flex items-center gap-1">
-                    <CheckCircle2 className="w-4 h-4" /> 识别到 {parsed.length} 个账户
+                    <CheckCircle2 className="w-4 h-4" /> 识别到 {parsed.accounts.length} 个账户
                   </span>
                 ) : (
                   <span className="text-yellow-600 font-medium flex items-center gap-1">
                     <AlertTriangle className="w-4 h-4" /> 未识别到有效账户
                   </span>
                 )}
+                {(parsed.duplicateCount > 0 || parsed.invalidCount > 0) && (
+                  <div className="text-xs text-gray-500">
+                    {parsed.duplicateCount > 0 && <span>重复跳过 {parsed.duplicateCount} 行</span>}
+                    {parsed.duplicateCount > 0 && parsed.invalidCount > 0 && <span> · </span>}
+                    {parsed.invalidCount > 0 && <span>格式无效 {parsed.invalidCount} 行</span>}
+                  </div>
+                )}
               </div>
             )}
 
             {/* Actions */}
             <div className="flex gap-3 pt-4">
-              <Button type="button" variant="secondary" onClick={handleClose} className="flex-1">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleClose}
+                disabled={importMutation.isPending}
+                className="flex-1"
+              >
                 取消
               </Button>
               <Button
                 onClick={handleImport}
                 loading={importMutation.isPending}
-                disabled={parsed.length === 0}
+                disabled={parsed.accounts.length === 0}
                 className="flex-1"
               >
-                导入 {parsed.length > 0 && `(${parsed.length})`}
+                导入 {parsed.accounts.length > 0 && `(${parsed.accounts.length})`}
               </Button>
             </div>
           </>

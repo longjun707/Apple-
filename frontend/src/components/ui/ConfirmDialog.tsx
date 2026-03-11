@@ -22,7 +22,7 @@ export default function ConfirmDialog({
   loading,
 }: ConfirmDialogProps) {
   return (
-    <Modal open={open} onClose={onClose}>
+    <Modal open={open} onClose={onClose} disableClose={!!loading}>
       <div className="p-6">
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">

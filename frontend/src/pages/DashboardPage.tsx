@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { api } from '@/api/client'
+import { api, getErrorMessage, unwrapResponse } from '@/api/client'
 import { Users, Mail, AlertCircle, CheckCircle, Activity, Plus, Layers, Download, ArrowRight, Loader2 } from 'lucide-react'
 
 interface DashboardPageProps {
@@ -7,20 +7,30 @@ interface DashboardPageProps {
 }
 
 export default function DashboardPage({ onNavigate }: DashboardPageProps) {
-  const { data: statsData, isLoading: statsLoading } = useQuery({
+  const {
+    data: statsData,
+    isLoading: statsLoading,
+    isError: statsQueryError,
+    error: statsError,
+  } = useQuery({
     queryKey: ['admin-stats'],
-    queryFn: () => api.getStats(),
+    queryFn: async () => unwrapResponse(await api.getStats(), '获取统计信息失败'),
   })
 
-  const { data: accountsData, isLoading: accountsLoading } = useQuery({
+  const {
+    data: accountsData,
+    isLoading: accountsLoading,
+    isError: accountsQueryError,
+    error: accountsError,
+  } = useQuery({
     queryKey: ['accounts', 1],
-    queryFn: () => api.listAccounts(1, 5),
+    queryFn: async () => unwrapResponse(await api.listAccounts(1, 5), '获取最近账户失败'),
   })
 
   const isLoading = statsLoading || accountsLoading
-  const accounts = accountsData?.data?.list || []
+  const accounts = accountsData?.list || []
 
-  const s = statsData?.data
+  const s = statsData
   const stats = [
     {
       label: '账户总数',
@@ -79,6 +89,13 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
         <p className="text-sm text-gray-500 mt-1">系统概览与快速操作</p>
       </div>
 
+      {(statsQueryError || accountsQueryError) && (
+        <div className="mb-5 rounded-2xl border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-700">
+          {statsQueryError && <div>统计数据加载失败：{getErrorMessage(statsError, '获取统计信息失败')}</div>}
+          {accountsQueryError && <div>最近账户加载失败：{getErrorMessage(accountsError, '获取最近账户失败')}</div>}
+        </div>
+      )}
+
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
         {stats.map((stat, index) => (
@@ -122,6 +139,10 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
           {isLoading ? (
             <div className="flex justify-center py-8">
               <Loader2 className="w-6 h-6 animate-spin text-gray-300" />
+            </div>
+          ) : accountsQueryError ? (
+            <div className="text-center py-10 text-sm text-red-500">
+              {getErrorMessage(accountsError, '获取最近账户失败')}
             </div>
           ) : accounts.length === 0 ? (
             <div className="text-center py-10">

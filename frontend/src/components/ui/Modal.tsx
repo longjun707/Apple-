@@ -6,18 +6,19 @@ interface ModalProps {
   onClose: () => void
   children: ReactNode
   className?: string
+  disableClose?: boolean
 }
 
-export default function Modal({ open, onClose, children, className }: ModalProps) {
+export default function Modal({ open, onClose, children, className, disableClose = false }: ModalProps) {
   // Escape key to close
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape' && !disableClose) onClose()
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [open, onClose])
+  }, [disableClose, open, onClose])
 
   // Lock body scroll while open
   useEffect(() => {
@@ -31,8 +32,13 @@ export default function Modal({ open, onClose, children, className }: ModalProps
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in">
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-[6px]" onClick={onClose} />
       <div
+        className="absolute inset-0 bg-black/30 backdrop-blur-[6px]"
+        onClick={disableClose ? undefined : onClose}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
         className={cn(
           'relative bg-white rounded-2xl shadow-modal w-full max-w-md animate-slide-up',
           className,

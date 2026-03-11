@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { api, type AppleAccount } from '@/api/client'
+import { api, getErrorMessage, type AppleAccount } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import Modal from '@/components/ui/Modal'
 import Button from '@/components/ui/Button'
@@ -18,6 +18,8 @@ export default function AccountFormModal({ open, account, onClose, onSuccess }: 
   const [password, setPassword] = useState('')
   const [remark, setRemark] = useState('')
   const [error, setError] = useState('')
+  const normalizedAppleId = appleId.trim().toLowerCase()
+  const normalizedRemark = remark.trim()
 
   // Sync form state when modal opens or account changes
   useEffect(() => {
@@ -29,44 +31,46 @@ export default function AccountFormModal({ open, account, onClose, onSuccess }: 
     }
   }, [open, account])
 
-  const createMutation = useMutation({
-    mutationFn: () => api.createAccount(appleId, password, remark),
+  const submitMutation = useMutation({
+    mutationFn: () =>
+      account
+        ? api.updateAccount(
+            account.id,
+            normalizedAppleId,
+            password.trim() || undefined,
+            normalizedRemark || undefined,
+          )
+        : api.createAccount(
+            normalizedAppleId,
+            password,
+            normalizedRemark || undefined,
+          ),
     onSuccess: (res) => {
       if (res.success) {
-        toast.success('账户添加成功')
+        toast.success(account ? '账户更新成功' : '账户添加成功')
         onSuccess()
       } else {
-        setError(res.error || '创建失败')
+        setError(res.error || (account ? '更新失败' : '创建失败'))
       }
     },
-    onError: () => setError('网络错误'),
+    onError: (mutationError) => setError(getErrorMessage(mutationError)),
   })
 
-  const updateMutation = useMutation({
-    mutationFn: () => api.updateAccount(account!.id, appleId, password || undefined, remark),
-    onSuccess: (res) => {
-      if (res.success) {
-        toast.success('账户更新成功')
-        onSuccess()
-      } else {
-        setError(res.error || '更新失败')
-      }
-    },
-    onError: () => setError('网络错误'),
-  })
+  const handleClose = () => {
+    if (submitMutation.isPending) return
+    submitMutation.reset()
+    setError('')
+    onClose()
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
-    if (account) {
-      updateMutation.mutate()
-    } else {
-      createMutation.mutate()
-    }
+    submitMutation.mutate()
   }
 
   return (
-    <Modal open={open} onClose={onClose}>
+    <Modal open={open} onClose={handleClose} disableClose={submitMutation.isPending}>
       <div className="p-6">
         <div className="flex items-center gap-3 mb-5">
           <div className="w-10 h-10 rounded-full bg-apple-blue/10 flex items-center justify-center">
@@ -83,7 +87,10 @@ export default function AccountFormModal({ open, account, onClose, onSuccess }: 
             <input
               type="email"
               value={appleId}
-              onChange={(e) => setAppleId(e.target.value)}
+              onChange={(e) => {
+                setAppleId(e.target.value)
+                setError('')
+              }}
               className="input"
               placeholder="your@email.com"
               required
@@ -97,7 +104,10 @@ export default function AccountFormModal({ open, account, onClose, onSuccess }: 
             <input
               type="password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value)
+                setError('')
+              }}
               className="input"
               placeholder="••••••••"
               required={!account}
@@ -109,7 +119,10 @@ export default function AccountFormModal({ open, account, onClose, onSuccess }: 
             <input
               type="text"
               value={remark}
-              onChange={(e) => setRemark(e.target.value)}
+              onChange={(e) => {
+                setRemark(e.target.value)
+                setError('')
+              }}
               className="input"
               placeholder="可选"
             />
@@ -122,12 +135,19 @@ export default function AccountFormModal({ open, account, onClose, onSuccess }: 
           )}
 
           <div className="flex gap-3 pt-2">
-            <Button type="button" variant="secondary" onClick={onClose} className="flex-1">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleClose}
+              disabled={submitMutation.isPending}
+              className="flex-1"
+            >
               取消
             </Button>
             <Button
               type="submit"
-              loading={createMutation.isPending || updateMutation.isPending}
+              loading={submitMutation.isPending}
+              disabled={!normalizedAppleId || (!account && !password)}
               className="flex-1"
             >
               {account ? '保存' : '添加'}

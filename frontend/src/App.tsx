@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useState } from 'react'
 import { useAuthStore } from '@/stores/authStore'
-import { setOnUnauthorized, api, clearSession } from '@/api/client'
+import { setOnUnauthorized, api, clearSession, hasSession } from '@/api/client'
 import LoginPage from '@/pages/LoginPage'
 import DashboardPage from '@/pages/DashboardPage'
 import AccountsPage from '@/pages/AccountsPage'
@@ -18,6 +18,7 @@ function App() {
   const admin = useAuthStore((s) => s.admin)
   const logout = useAuthStore((s) => s.logout)
   const setAdmin = useAuthStore((s) => s.setAdmin)
+  const setAuthState = useAuthStore((s) => s.setState)
   const [currentPage, setCurrentPage] = useState('dashboard')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sessionChecked, setSessionChecked] = useState(false)
@@ -31,26 +32,23 @@ function App() {
     })
   }, [logout])
 
-  // Validate session on mount — if persisted auth exists, verify it's still valid
+  // Validate session on mount — if auth state or a persisted session ID exists, verify it
   useEffect(() => {
-    // 只在组件挂载时执行一次，使用 ref 避免重复执行
     let isMounted = true
-    
     const validateSession = async () => {
-      if (authState !== 'authenticated') {
+      if (authState !== 'authenticated' && !hasSession()) {
         setSessionChecked(true)
         return
       }
-      
       try {
         const res = await api.adminInfo()
         if (!isMounted) return
-        
         if (!res.success) {
           clearSession()
           logout()
         } else if (res.data) {
           setAdmin(res.data)
+          setAuthState('authenticated')
         }
       } finally {
         if (isMounted) {
@@ -64,7 +62,7 @@ function App() {
     return () => {
       isMounted = false
     }
-  }, [authState, logout, setAdmin])
+  }, [authState, logout, setAdmin, setAuthState])
 
   const handleLogout = useCallback(async () => {
     try {

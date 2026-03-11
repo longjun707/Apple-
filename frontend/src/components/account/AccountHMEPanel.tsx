@@ -1,6 +1,14 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api, type AppleAccount, type HMEEmail, type FamilyResponse, type ForwardEmailResponse } from '@/api/client'
+import {
+  api,
+  getErrorMessage,
+  isAppleAccountLoginRequiredError,
+  unwrapResponse,
+  type AppleAccount,
+  type HMEEmail,
+  type FamilyResponse,
+} from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import { Loader2, ArrowLeft, RefreshCw, Mail, Plus, X, Users, Crown, User, Forward, Check } from 'lucide-react'
 import Button from '@/components/ui/Button'
@@ -13,6 +21,9 @@ import EmptyState from '@/components/email/EmptyState'
 import BatchCreateModal from '@/components/email/BatchCreateModal'
 import CreateEmailModal from '@/components/email/CreateEmailModal'
 import AlternateEmailModal from '@/components/account/AlternateEmailModal'
+import { useForwardEmailOptions } from '@/hooks/useForwardEmailOptions'
+import { usePersistedPageSize } from '@/hooks/usePersistedPageSize'
+import { downloadCsv } from '@/lib/csv'
 
 interface AccountHMEPanelProps {
   account: AppleAccount
@@ -28,42 +39,63 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
   const [deleteTarget, setDeleteTarget] = useState<HMEEmail | null>(null)
   const [removeAlternateTarget, setRemoveAlternateTarget] = useState<string | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
+  const [pageSize, setPageSize] = usePersistedPageSize('account-hme-page-size')
   const queryClient = useQueryClient()
 
   // ---- Data ----
-  const { data, isLoading, refetch } = useQuery({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ['account-hme', account.id],
-    queryFn: async () => {
-      const res = await api.getAccountHME(account.id)
-      if (!res.success) throw new Error(res.error)
-      return res.data || []
-    },
+    queryFn: async () => unwrapResponse(await api.getAccountHME(account.id), '获取隐藏邮箱失败'),
   })
 
   const hmeList = data || []
+  const detailQueriesEnabled = !isLoading && !isError
 
   // Family members query
-  const { data: familyData, isLoading: familyLoading, refetch: refetchFamily } = useQuery({
+  const {
+    data: familyResource,
+    isLoading: familyLoading,
+    isError: familyQueryError,
+    error: familyError,
+    refetch: refetchFamily,
+  } = useQuery({
     queryKey: ['account-family', account.id],
-    queryFn: async () => {
-      const res = await api.getFamilyMembers(account.id)
-      if (!res.success) return null
-      return res.data as FamilyResponse
+    queryFn: async (): Promise<{ data: FamilyResponse | null; needsLogin: boolean }> => {
+      const response = await api.getFamilyMembers(account.id)
+
+      if (!response.success) {
+        if (isAppleAccountLoginRequiredError(response.error)) {
+          return { data: null, needsLogin: true }
+        }
+
+        throw new Error(getErrorMessage(response.error, '获取家人共享信息失败'))
+      }
+
+      return {
+        data: unwrapResponse(response, '获取家人共享信息失败'),
+        needsLogin: false,
+      }
     },
+    enabled: detailQueriesEnabled,
     retry: false,
   })
+  const familyData = familyResource?.data ?? null
+  const familyNeedsLogin = familyResource?.needsLogin ?? false
 
   // Forward email options query
-  const { data: forwardEmailData, isLoading: forwardEmailLoading, refetch: refetchForwardEmail } = useQuery({
-    queryKey: ['account-forward-email', account.id],
-    queryFn: async () => {
-      const res = await api.getForwardEmailOptions(account.id)
-      if (!res.success) return null
-      return res.data as ForwardEmailResponse
-    },
-    retry: false,
-  })
+  const {
+    data: forwardEmailData,
+    isLoading: forwardEmailLoading,
+    isError: forwardEmailQueryError,
+    error: forwardEmailError,
+    refetch: refetchForwardEmail,
+  } = useForwardEmailOptions(account.id, detailQueriesEnabled)
 
   // ---- Mutations ----
   const deleteMutation = useMutation({
@@ -78,8 +110,8 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
       }
       setDeleteTarget(null)
     },
-    onError: () => {
-      toast.error('网络错误')
+    onError: (mutationError) => {
+      toast.error(getErrorMessage(mutationError))
       setDeleteTarget(null)
     },
   })
@@ -89,14 +121,15 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
     onSuccess: (res) => {
       if (res.success) {
         queryClient.invalidateQueries({ queryKey: ['accounts'] })
+        queryClient.invalidateQueries({ queryKey: ['account-forward-email-options', account.id] })
         toast.success('备用邮箱已移除')
       } else {
         toast.error(res.error || '移除失败')
       }
       setRemoveAlternateTarget(null)
     },
-    onError: () => {
-      toast.error('网络错误')
+    onError: (mutationError) => {
+      toast.error(getErrorMessage(mutationError))
       setRemoveAlternateTarget(null)
     },
   })
@@ -106,25 +139,27 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
     onSuccess: (res) => {
       if (res.success) {
         queryClient.invalidateQueries({ queryKey: ['accounts'] })
+        queryClient.invalidateQueries({ queryKey: ['account-family', account.id] })
+        queryClient.invalidateQueries({ queryKey: ['account-forward-email-options', account.id] })
         toast.success('账户信息已刷新')
       } else {
         toast.error(res.error || '刷新失败')
       }
     },
-    onError: () => toast.error('网络错误'),
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   const setForwardEmailMutation = useMutation({
     mutationFn: (email: string) => api.setForwardEmail(account.id, email),
     onSuccess: (res) => {
       if (res.success) {
-        queryClient.invalidateQueries({ queryKey: ['account-forward-email', account.id] })
+        queryClient.invalidateQueries({ queryKey: ['account-forward-email-options', account.id] })
         toast.success('转发邮箱已更新')
       } else {
         toast.error(res.error || '设置失败')
       }
     },
-    onError: () => toast.error('网络错误'),
+    onError: (mutationError) => toast.error(getErrorMessage(mutationError)),
   })
 
   // Parse alternate emails
@@ -189,21 +224,17 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
 
   const handleExport = useCallback(() => {
     if (!hmeList.length) return
-    const esc = (v: string) => v.includes(',') || v.includes('"') ? `"${v.replace(/"/g, '""')}"` : v
-    const csv = [
-      'Email,Label,ForwardTo,Active,CreateTime',
-      ...hmeList.map(
-        (e: HMEEmail) =>
-          `${esc(e.emailAddress)},${esc(e.label)},${esc(e.forwardToEmail)},${e.active},${new Date(e.createTime).toISOString()}`,
-      ),
-    ].join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `hme-${account.appleId}-${new Date().toISOString().slice(0, 10)}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    downloadCsv(
+      `hme-${account.appleId}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['Email', 'Label', 'ForwardTo', 'Active', 'CreateTime'],
+      hmeList.map((email) => [
+        email.emailAddress,
+        email.label,
+        email.forwardToEmail,
+        email.active,
+        new Date(email.createTime).toISOString(),
+      ]),
+    )
     toast.success('已导出 CSV 文件')
   }, [hmeList, account.appleId])
 
@@ -221,7 +252,17 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
           <h2 className="text-xl font-bold text-gray-900 truncate tracking-tight">HME 管理</h2>
           <p className="text-sm text-gray-500 truncate mt-0.5">{account.appleId}</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => refetch()} icon={<RefreshCw className="w-3.5 h-3.5" />}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={async () => {
+            await refetch()
+            await refetchForwardEmail()
+            await refetchFamily()
+            await queryClient.invalidateQueries({ queryKey: ['accounts'] })
+          }}
+          icon={<RefreshCw className="w-3.5 h-3.5" />}
+        >
           刷新
         </Button>
       </div>
@@ -313,9 +354,9 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
               <div className="flex items-center justify-center py-4">
                 <Loader2 className="w-5 h-5 animate-spin text-gray-400" />
               </div>
-            ) : forwardEmailData?.forwardToOptions?.availableEmails && forwardEmailData.forwardToOptions.availableEmails.length > 0 ? (
-              forwardEmailData.forwardToOptions.availableEmails.map((emailOption) => {
-                const isCurrent = forwardEmailData.forwardToOptions.forwardToEmail?.address === emailOption.address
+            ) : forwardEmailData?.availableEmails.length ? (
+              forwardEmailData.availableEmails.map((emailOption) => {
+                const isCurrent = forwardEmailData.currentEmail === emailOption.address
                 return (
                   <div
                     key={emailOption.id}
@@ -356,9 +397,13 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
                   </div>
                 )
               })
+            ) : forwardEmailQueryError ? (
+              <div className="text-[12px] text-red-500 text-center py-2">
+                {getErrorMessage(forwardEmailError, '获取转发邮箱失败')}
+              </div>
             ) : (
               <div className="text-[12px] text-gray-400 text-center py-2">
-                {forwardEmailData === null ? '需要先登录账户' : '无可用转发邮箱'}
+                {forwardEmailData?.needsLogin ? '需要先登录账户' : '无可用转发邮箱'}
               </div>
             )}
           </div>
@@ -431,9 +476,13 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
                   </div>
                 )
               })
+            ) : familyQueryError ? (
+              <div className="text-[12px] text-red-500 text-center py-2">
+                {getErrorMessage(familyError, '获取家人共享信息失败')}
+              </div>
             ) : (
               <div className="text-[12px] text-gray-400 text-center py-2">
-                {familyData === null ? '需要先登录账户' : '未加入家人共享'}
+                {familyNeedsLogin ? '需要先登录账户' : '未加入家人共享'}
               </div>
             )}
           </div>
@@ -473,8 +522,14 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
         </div>
       )}
 
+      {!isLoading && isError && (
+        <div className="mb-5 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+          隐藏邮箱列表加载失败：{getErrorMessage(error, '获取隐藏邮箱失败')}
+        </div>
+      )}
+
       {/* Email list */}
-      {!isLoading && (
+      {!isLoading && !isError && (
         <div className="bg-white rounded-2xl shadow-card border border-gray-100/80 overflow-hidden">
           {filteredList.length === 0 ? (
             <EmptyState isFiltered={isFiltered} />
@@ -491,7 +546,7 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
                 ))}
               </div>
               {/* Pagination */}
-              {totalPages > 1 && (
+              {filteredList.length > 0 && (
                 <div className="border-t border-gray-100">
                   <Pagination
                     currentPage={currentPage}
@@ -530,6 +585,7 @@ export default function AccountHMEPanel({ account, onBack }: AccountHMEPanelProp
         onClose={() => setShowAlternateEmailModal(false)}
         onSuccess={() => {
           queryClient.invalidateQueries({ queryKey: ['accounts'] })
+          queryClient.invalidateQueries({ queryKey: ['account-forward-email-options', account.id] })
         }}
       />
 
