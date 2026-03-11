@@ -4,13 +4,14 @@ import { api, type AppleAccount, type PhoneNumber } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
   Plus, Trash2, LogIn, Mail, RefreshCw, Search,
-  Edit, Loader2, Users, Shield, Smartphone, Eye, Phone,
+  Edit, Loader2, Users, Shield, Smartphone, Eye, Phone, Upload,
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog'
 import AccountFormModal from '@/components/account/AccountFormModal'
 import TwoFAModal from '@/components/account/TwoFAModal'
 import AccountHMEPanel from '@/components/account/AccountHMEPanel'
+import BatchImportModal from '@/components/account/BatchImportModal'
 
 export default function AccountsPage() {
   const queryClient = useQueryClient()
@@ -23,6 +24,7 @@ export default function AccountsPage() {
   const [selectedAccount, setSelectedAccount] = useState<AppleAccount | null>(null)
   const [twoFAAccountId, setTwoFAAccountId] = useState<number | null>(null)
   const [twoFAPhones, setTwoFAPhones] = useState<PhoneNumber[]>([])
+  const [batchImportOpen, setBatchImportOpen] = useState(false)
 
   // ---- Data ----
   const { data, isLoading, refetch } = useQuery({
@@ -39,11 +41,13 @@ export default function AccountsPage() {
   const loginMutation = useMutation({
     mutationFn: (id: number) => api.loginAppleAccount(id),
     onSuccess: (res, id) => {
+      console.log('[Login] Response:', JSON.stringify(res, null, 2))
       if (!res.success) {
         toast.error(res.error || '登录失败')
         return
       }
       if (res.data?.requires2fa) {
+        console.log('[Login] phoneNumbers:', res.data?.phoneNumbers)
         setTwoFAAccountId(id)
         setTwoFAPhones(res.data?.phoneNumbers || [])
       } else {
@@ -90,6 +94,9 @@ export default function AccountsPage() {
         <div className="flex gap-2">
           <Button onClick={() => refetch()} variant="outline" size="sm" icon={<RefreshCw className="w-4 h-4" />}>
             刷新
+          </Button>
+          <Button onClick={() => setBatchImportOpen(true)} variant="outline" size="sm" icon={<Upload className="w-4 h-4" />}>
+            批量导入
           </Button>
           <Button onClick={() => setFormAccount(null)} size="sm" icon={<Plus className="w-4 h-4" />}>
             添加账户
@@ -359,6 +366,15 @@ export default function AccountsPage() {
           toast.success('Apple 账户登录成功')
           // Refresh accounts list to get updated data
           await queryClient.invalidateQueries({ queryKey: ['accounts'] })
+        }}
+      />
+
+      <BatchImportModal
+        open={batchImportOpen}
+        onClose={() => setBatchImportOpen(false)}
+        onSuccess={() => {
+          setBatchImportOpen(false)
+          queryClient.invalidateQueries({ queryKey: ['accounts'] })
         }}
       />
 

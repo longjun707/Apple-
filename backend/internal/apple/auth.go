@@ -28,9 +28,88 @@ func SetDebugMode(enabled bool) {
 	debugMode = enabled
 }
 
+var authDebugFile *os.File
+
 func init() {
 	// Default: discard SRP debug logs; enable via SetDebugMode(true)
 	srpLog = log.New(io.Discard, "[SRP] ", log.LstdFlags)
+}
+
+// logAuthRequest logs detailed request info to auth_debug.log
+func logAuthRequest(method, urlStr string, headers map[string]string, body []byte, jar http.CookieJar) {
+	if authDebugFile == nil {
+		var err error
+		authDebugFile, err = os.OpenFile("auth_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Printf("[AuthDebug] Failed to open log file: %v", err)
+			return
+		}
+	}
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	fmt.Fprintf(authDebugFile, "\n========== %s ==========\n", timestamp)
+	fmt.Fprintf(authDebugFile, "REQUEST: %s %s\n", method, urlStr)
+	
+	fmt.Fprintf(authDebugFile, "\n--- Request Headers ---\n")
+	for k, v := range headers {
+		// Truncate long values for readability
+		if len(v) > 200 {
+			fmt.Fprintf(authDebugFile, "%s: %s... (len=%d)\n", k, v[:200], len(v))
+		} else {
+			fmt.Fprintf(authDebugFile, "%s: %s\n", k, v)
+		}
+	}
+	
+	if body != nil {
+		fmt.Fprintf(authDebugFile, "\n--- Request Body ---\n%s\n", string(body))
+	}
+	
+	// Log cookies for the request URL
+	if jar != nil {
+		u, _ := url.Parse(urlStr)
+		if u != nil {
+			cookies := jar.Cookies(u)
+			if len(cookies) > 0 {
+				fmt.Fprintf(authDebugFile, "\n--- Cookies for %s ---\n", u.Host)
+				for _, c := range cookies {
+					if len(c.Value) > 50 {
+						fmt.Fprintf(authDebugFile, "%s: %s... (len=%d)\n", c.Name, c.Value[:50], len(c.Value))
+					} else {
+						fmt.Fprintf(authDebugFile, "%s: %s\n", c.Name, c.Value)
+					}
+				}
+			}
+		}
+	}
+	
+	authDebugFile.Sync()
+}
+
+// LogAuthResponse logs detailed response info to auth_debug.log
+func LogAuthResponse(statusCode int, headers http.Header, body []byte) {
+	if authDebugFile == nil {
+		return
+	}
+	
+	fmt.Fprintf(authDebugFile, "\n--- Response Status ---\n%d\n", statusCode)
+	
+	fmt.Fprintf(authDebugFile, "\n--- Response Headers ---\n")
+	for k, vals := range headers {
+		for _, v := range vals {
+			if len(v) > 200 {
+				fmt.Fprintf(authDebugFile, "%s: %s... (len=%d)\n", k, v[:200], len(v))
+			} else {
+				fmt.Fprintf(authDebugFile, "%s: %s\n", k, v)
+			}
+		}
+	}
+	
+	if body != nil {
+		fmt.Fprintf(authDebugFile, "\n--- Response Body ---\n%s\n", string(body))
+	}
+	
+	fmt.Fprintf(authDebugFile, "\n=====================================\n")
+	authDebugFile.Sync()
 }
 
 func enableSRPLog() {
@@ -53,6 +132,13 @@ type AppleAuth struct {
 func NewAppleAuth() *AppleAuth {
 	return &AppleAuth{
 		session: NewSession(),
+	}
+}
+
+// NewAppleAuthWithProxy creates a new auth client with proxy support
+func NewAppleAuthWithProxy(proxyURL string) *AppleAuth {
+	return &AppleAuth{
+		session: NewSessionWithProxy(proxyURL),
 	}
 }
 
@@ -168,23 +254,31 @@ func (a *AppleAuth) authHeaders() map[string]string {
 }
 
 // doRequest performs an HTTP request with auth headers
-func (a *AppleAuth) doRequest(method, url string, body interface{}) (*http.Response, error) {
+func (a *AppleAuth) doRequest(method, urlStr string, body interface{}) (*http.Response, error) {
 	var bodyReader io.Reader
+	var bodyBytes []byte
 	if body != nil {
-		jsonData, err := json.Marshal(body)
+		var err error
+		bodyBytes, err = json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		bodyReader = bytes.NewReader(jsonData)
+		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequest(method, urlStr, bodyReader)
 	if err != nil {
 		return nil, err
 	}
 
-	for k, v := range a.authHeaders() {
+	headers := a.authHeaders()
+	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+
+	// Debug logging to file - request
+	if debugMode {
+		logAuthRequest(method, urlStr, headers, bodyBytes, a.session.Client.Jar)
 	}
 
 	resp, err := a.session.Client.Do(req)
@@ -194,6 +288,15 @@ func (a *AppleAuth) doRequest(method, url string, body interface{}) (*http.Respo
 
 	// Capture session headers
 	a.captureSessionHeaders(resp)
+
+	// Debug logging to file - response (read and re-wrap body)
+	if debugMode {
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		LogAuthResponse(resp.StatusCode, resp.Header, respBody)
+		// Re-wrap body so caller can still read it
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	}
 
 	return resp, nil
 }
@@ -362,9 +465,15 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 	}
 
 	jsonData, _ := json.Marshal(completeReq)
-	req, _ := http.NewRequest("POST", AuthBase+"/signin/complete?isRememberMeEnabled=true", bytes.NewReader(jsonData))
+	completeURL := AuthBase + "/signin/complete?isRememberMeEnabled=true"
+	req, _ := http.NewRequest("POST", completeURL, bytes.NewReader(jsonData))
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+
+	// Debug logging
+	if debugMode {
+		logAuthRequest("POST", completeURL, headers, jsonData, a.session.Client.Jar)
 	}
 
 	srpLog.Printf("sending complete: m1_len=%d, m2_len=%d", len(m1B64), len(m2B64))
@@ -374,7 +483,13 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 	}
 	defer resp.Body.Close()
 	a.captureSessionHeaders(resp)
-	srpLog.Printf("complete response: status=%d", resp.StatusCode)
+	
+	// Read and log response body
+	respBody, _ := io.ReadAll(resp.Body)
+	if debugMode {
+		LogAuthResponse(resp.StatusCode, resp.Header, respBody)
+	}
+	srpLog.Printf("complete response: status=%d, body=%s", resp.StatusCode, string(respBody))
 
 	switch resp.StatusCode {
 	case 200:
@@ -385,7 +500,18 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 		return &LoginResult{State: AuthStateAuthenticated, Message: "Login successful"}, nil
 
 	case 409:
-		// Parse phone numbers from 409 response
+		// 409 means 2FA required - need to call GET /auth to get phone numbers
+		srpLog.Printf("409 2FA required, calling GET /auth to get phone numbers")
+		
+		// Call GET /auth to get trustedPhoneNumbers
+		authResp, err := a.doRequest("GET", AuthBase, nil)
+		if err != nil {
+			log.Printf("[Login] Failed to get auth state: %v", err)
+			return &LoginResult{State: AuthStateNeeds2FA, Requires2FA: true, Message: "2FA required"}, nil
+		}
+		defer authResp.Body.Close()
+		
+		authBody, _ := io.ReadAll(authResp.Body)
 		var twoFAInfo struct {
 			TrustedPhoneNumbers []struct {
 				ID                 int    `json:"id"`
@@ -394,9 +520,8 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 				PushMode           string `json:"pushMode"`
 			} `json:"trustedPhoneNumbers"`
 		}
-		resBody, _ := io.ReadAll(resp.Body)
-		json.Unmarshal(resBody, &twoFAInfo)
-		srpLog.Printf("409 2FA info: %s", string(resBody))
+		json.Unmarshal(authBody, &twoFAInfo)
+		srpLog.Printf("GET /auth returned %d phone numbers", len(twoFAInfo.TrustedPhoneNumbers))
 
 		result := &LoginResult{State: AuthStateNeeds2FA, Requires2FA: true, Message: "2FA required"}
 		for _, p := range twoFAInfo.TrustedPhoneNumbers {
@@ -409,10 +534,10 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 				NumberWithDialCode string `json:"numberWithDialCode"`
 			}{ID: p.ID, NumberWithDialCode: number})
 		}
+		log.Printf("[Login] 2FA required, phoneNumbers=%+v", result.PhoneNumbers)
 		return result, nil
 
 	case 401:
-		respBody, _ := io.ReadAll(resp.Body)
 		srpLog.Printf("401 response body: %s", string(respBody))
 		return nil, fmt.Errorf("SRP verification failed: %s", string(respBody))
 
@@ -423,8 +548,7 @@ func (a *AppleAuth) Login(username, password string) (*LoginResult, error) {
 		return nil, fmt.Errorf("additional action required on Apple device")
 
 	default:
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("login failed: HTTP %d - %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("login failed: HTTP %d - %s", resp.StatusCode, string(respBody))
 	}
 }
 
@@ -519,6 +643,9 @@ func (a *AppleAuth) RequestSMSCode(phoneID int) error {
 	}
 	defer resp.Body.Close()
 
+	// Read response body
+	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode == 200 || resp.StatusCode == 202 {
 		return nil
 	}
@@ -531,7 +658,7 @@ func (a *AppleAuth) RequestSMSCode(phoneID int) error {
 	case 429:
 		return fmt.Errorf("请求过于频繁(429)，请稍后重试")
 	default:
-		return fmt.Errorf("发送验证码失败: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("发送验证码失败: HTTP %d - %s", resp.StatusCode, string(body))
 	}
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -35,6 +36,18 @@ type UpdateAccountRequest struct {
 	AppleID  string `json:"appleId" binding:"required"`
 	Password string `json:"password"` // 留空则不修改
 	Remark   string `json:"remark"`
+}
+
+// BatchImportRequest represents a batch account import request
+type BatchImportRequest struct {
+	Accounts []AccountRequest `json:"accounts" binding:"required,min=1,max=500"`
+}
+
+// BatchImportResult represents the result of a batch account import
+type BatchImportResult struct {
+	Created int      `json:"created"`
+	Skipped int      `json:"skipped"`
+	Errors  []string `json:"errors"`
 }
 
 // clampPageSize enforces pageSize bounds [1, 100], defaulting to 20.
@@ -149,6 +162,52 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 
 // maxSessionAge is the maximum age for a restored Apple session (7 days)
 const maxSessionAge = 7 * 24 * time.Hour
+
+// getProxyURL gets the proxy URL from settings
+// If it's an extraction API (contains "extract" or similar), fetch the real proxy first
+func getProxyURL() string {
+	if store.DB == nil {
+		return ""
+	}
+	
+	proxyConfig, _ := store.GetSetting("proxy_url")
+	if proxyConfig == "" {
+		return ""
+	}
+	
+	// Check if this is an extraction API (common patterns: extract, api, core-extract)
+	if strings.Contains(proxyConfig, "extract") || strings.Contains(proxyConfig, "/api/") {
+		// It's an extraction API, fetch the real proxy
+		log.Printf("[Proxy] Fetching proxy from API: %s", proxyConfig)
+		
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(proxyConfig)
+		if err != nil {
+			log.Printf("[Proxy] Failed to fetch proxy: %v", err)
+			return ""
+		}
+		defer resp.Body.Close()
+		
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("[Proxy] Failed to read proxy response: %v", err)
+			return ""
+		}
+		
+		proxyAddr := strings.TrimSpace(string(body))
+		log.Printf("[Proxy] Got proxy address: %s", proxyAddr)
+		
+		// If the response doesn't have a scheme, add http://
+		if proxyAddr != "" && !strings.HasPrefix(proxyAddr, "http") && !strings.HasPrefix(proxyAddr, "socks") {
+			proxyAddr = "http://" + proxyAddr
+		}
+		
+		return proxyAddr
+	}
+	
+	// Direct proxy URL
+	return proxyConfig
+}
 
 // ensureAppleSession checks if Apple session is active for the account, tries to restore from DB if not
 func ensureAppleSession(session *SessionState, accountID uint) bool {
@@ -290,6 +349,54 @@ func (s *Server) ListAccounts(c *gin.Context) {
 	})
 }
 
+// BatchCreateAccounts imports multiple Apple accounts at once
+func (s *Server) BatchCreateAccounts(c *gin.Context) {
+	var req BatchImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "参数无效: " + err.Error()})
+		return
+	}
+
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
+	result := BatchImportResult{
+		Errors: make([]string, 0),
+	}
+
+	for _, item := range req.Accounts {
+		if item.AppleID == "" || item.Password == "" {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: Apple ID 或密码为空", item.AppleID))
+			continue
+		}
+
+		// Check if account already exists
+		var existing store.Account
+		if err := store.DB.Where("apple_id = ?", item.AppleID).First(&existing).Error; err == nil {
+			result.Skipped++
+			continue
+		}
+
+		account := &store.Account{
+			AppleID:  item.AppleID,
+			Password: store.EncryptPassword(item.Password),
+			Remark:   item.Remark,
+			Status:   1,
+		}
+
+		if err := store.DB.Create(account).Error; err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", item.AppleID, err))
+			continue
+		}
+
+		result.Created++
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: result})
+}
+
 // CreateAccount creates a new Apple account
 func (s *Server) CreateAccount(c *gin.Context) {
 	var req AccountRequest
@@ -402,8 +509,16 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 		return
 	}
 
-	// Create Apple auth client
-	auth := apple.NewAppleAuth()
+	// Get proxy from settings
+	proxyURL := getProxyURL()
+	
+	// Create Apple auth client (with proxy if configured)
+	var auth *apple.AppleAuth
+	if proxyURL != "" {
+		auth = apple.NewAppleAuthWithProxy(proxyURL)
+	} else {
+		auth = apple.NewAppleAuth()
+	}
 	result, err := auth.Login(account.AppleID, plainPassword)
 
 	// Update account status
@@ -562,8 +677,12 @@ func (s *Server) RequestSMSForAccount(c *gin.Context) {
 		PhoneID int `json:"phoneId"`
 	}
 	c.ShouldBindJSON(&req)
+	
+	log.Printf("[RequestSMS] phoneId=%d", req.PhoneID)
+	
 	if req.PhoneID == 0 {
-		req.PhoneID = 1
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "请选择一个电话号码发送验证码"})
+		return
 	}
 
 	if err := session.Auth.RequestSMSCode(req.PhoneID); err != nil {
@@ -622,6 +741,7 @@ func RefreshAllSessions() {
 		// Restore session
 		auth := apple.RestoreAppleAuth(account.SessionToken, account.SessionSCNT, account.SessionID, account.SessionCookies)
 		hme := apple.NewHMEClient(auth)
+		hme.MarkRestoredSession() // Skip Bootstrap validation for restored sessions
 
 		// Try to extend session
 		ok, err := hme.ExtendSession()
@@ -827,52 +947,45 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 			continue
 		}
 
-		// Create HME one by one (synchronously, no concurrency)
-		created := 0
-		consecutiveFailed := 0
-		failed := 0
-		batchTS := time.Now().Format("0102-1504")
-		for i := 0; i < countPerAccount; i++ {
-			autoHMEStatus.mu.Lock()
-			autoHMEStatus.CurrentProgress = i + 1
-			autoHMEStatus.mu.Unlock()
+		// Use BatchCreateEmails (same as manual batch creation) for consistency
+		autoHMEStatus.mu.Lock()
+		autoHMEStatus.CurrentProgress = 0
+		autoHMEStatus.mu.Unlock()
 
-			label := fmt.Sprintf("Auto-%s-%d", batchTS, i+1)
-			email, err := hme.CreateEmail(label, "", "")
-			if err != nil {
-				addAutoHMELog("error", fmt.Sprintf("账户 %s: 创建第 %d 个 HME 失败: %v", account.AppleID, i+1, err))
-				consecutiveFailed++
-				failed++
-				// If we get too many consecutive failures, stop for this account
-				if consecutiveFailed >= 3 {
-					addAutoHMELog("warning", fmt.Sprintf("账户 %s: 连续失败 %d 次，跳过剩余创建", account.AppleID, consecutiveFailed))
-					break
-				}
-				time.Sleep(2 * time.Second) // Wait longer on failure
-				continue
-			}
+		labelPrefix := fmt.Sprintf("Auto-%s", time.Now().Format("0102-1504"))
+		delayMs := 1000 // 1 second between creations, same as manual default
 
-			// Reset consecutive failure counter on success
-			consecutiveFailed = 0
+		results, errs := hme.BatchCreateEmails(countPerAccount, labelPrefix, delayMs, "")
 
-			// Save to database
+		// Update progress
+		autoHMEStatus.mu.Lock()
+		autoHMEStatus.CurrentProgress = len(results) + len(errs)
+		autoHMEStatus.mu.Unlock()
+
+		// Save to database
+		if len(results) > 0 {
 			hmeRepo := store.NewHMERepo()
-			hmeRepo.Create(&store.HMERecord{
-				AccountID:      account.ID,
-				HMEID:          email.ID,
-				EmailAddress:   email.EmailAddress,
-				Label:          email.Label,
-				Note:           email.Note,
-				ForwardToEmail: email.ForwardToEmail,
-				Active:         email.Active,
-			})
-
-			created++
-
-			// Delay between creations (1 second)
-			if i < countPerAccount-1 {
-				time.Sleep(1 * time.Second)
+			records := make([]store.HMERecord, len(results))
+			for i, email := range results {
+				records[i] = store.HMERecord{
+					AccountID:      account.ID,
+					HMEID:          email.ID,
+					EmailAddress:   email.EmailAddress,
+					Label:          email.Label,
+					Note:           email.Note,
+					ForwardToEmail: email.ForwardToEmail,
+					Active:         email.Active,
+				}
 			}
+			hmeRepo.BatchCreate(records)
+		}
+
+		created := len(results)
+		failed := len(errs)
+
+		// Log errors
+		for _, err := range errs {
+			addAutoHMELog("error", fmt.Sprintf("账户 %s: %v", account.AppleID, err))
 		}
 
 		// Update HME count for this account
@@ -999,17 +1112,16 @@ func (s *Server) UpdateAutoHMESettings(c *gin.Context) {
 
 // TriggerAutoHME manually triggers the auto HME creation
 func (s *Server) TriggerAutoHME(c *gin.Context) {
-	autoHMEStatus.mu.Lock()
+	autoHMEStatus.mu.RLock()
 	if autoHMEStatus.Running {
-		autoHMEStatus.mu.Unlock()
+		autoHMEStatus.mu.RUnlock()
 		c.JSON(http.StatusOK, APIResponse{Success: false, Error: "任务正在执行中"})
 		return
 	}
-	// Mark as running under the same lock to prevent TOCTOU race
-	autoHMEStatus.Running = true
 	countPerAcc := autoHMEStatus.CountPerAccount
-	autoHMEStatus.mu.Unlock()
+	autoHMEStatus.mu.RUnlock()
 
+	// Let AutoCreateHMEForAllAccounts set Running flag itself
 	go func() {
 		addAutoHMELog("info", "手动触发自动创建 HME 任务...")
 		AutoCreateHMEForAllAccounts(countPerAcc)
@@ -1140,6 +1252,9 @@ func (s *Server) CreateAccountHME(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
 	}
+
+	// Save session after successful HME creation (new cookies may have been set)
+	go saveAppleSession(uint(id), session.Auth)
 
 	// Save to database
 	hmeRepo := store.NewHMERepo()
@@ -1381,6 +1496,9 @@ func (s *Server) BatchCreateAccountHME(c *gin.Context) {
 	}
 
 	results, errors := session.HME.BatchCreateEmails(req.Count, req.LabelPrefix, req.DelayMs, req.ForwardToEmail)
+
+	// Save session after batch creation (new cookies may have been set)
+	go saveAppleSession(uint(id), session.Auth)
 
 	// Save to database
 	if len(results) > 0 {
@@ -1649,5 +1767,46 @@ func (s *Server) SetForwardEmail(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, APIResponse{Success: true})
+}
+
+// GetSystemSettings returns system settings
+func (s *Server) GetSystemSettings(c *gin.Context) {
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
+	proxyURL, _ := store.GetSetting("proxy_url")
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]string{
+			"proxyUrl": proxyURL,
+		},
+	})
+}
+
+// UpdateSystemSettings updates system settings
+func (s *Server) UpdateSystemSettings(c *gin.Context) {
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
+	var req struct {
+		ProxyURL string `json:"proxyUrl"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	if err := store.SetSetting("proxy_url", req.ProxyURL); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "保存失败"})
+		return
+	}
+
+	log.Printf("[Settings] Proxy URL updated: %s", req.ProxyURL)
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }

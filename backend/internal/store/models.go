@@ -122,3 +122,40 @@ func (HMERecord) TableName() string {
 func (LoginLog) TableName() string {
 	return "login_logs"
 }
+
+// SystemSetting stores system configuration key-value pairs
+type SystemSetting struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Key       string    `gorm:"uniqueIndex;size:100" json:"key"`
+	Value     string    `gorm:"type:text" json:"value"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// TableName sets the table name for SystemSetting
+func (SystemSetting) TableName() string {
+	return "system_settings"
+}
+
+// GetSetting retrieves a setting value by key
+func GetSetting(key string) (string, error) {
+	var setting SystemSetting
+	if err := DB.Where("key = ?", key).First(&setting).Error; err != nil {
+		return "", err
+	}
+	return setting.Value, nil
+}
+
+// SetSetting saves or updates a setting
+func SetSetting(key, value string) error {
+	var setting SystemSetting
+	result := DB.Where("key = ?", key).First(&setting)
+	if result.Error != nil {
+		// Create new
+		setting = SystemSetting{Key: key, Value: value}
+		return DB.Create(&setting).Error
+	}
+	// Update existing
+	setting.Value = value
+	return DB.Save(&setting).Error
+}

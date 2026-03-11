@@ -211,6 +211,9 @@ export const api = {
   createAccount: (appleId: string, password: string, remark?: string) =>
     request<AppleAccount>('POST', '/accounts', { appleId, password, remark }),
 
+  batchCreateAccounts: (accounts: { appleId: string; password: string; remark?: string }[]) =>
+    request<{ created: number; skipped: number; errors: string[] }>('POST', '/accounts/batch', { accounts }),
+
   updateAccount: (id: number, appleId: string, password?: string, remark?: string) =>
     request('PUT', `/accounts/${id}`, { appleId, password, remark }),
 
@@ -291,6 +294,11 @@ export const api = {
   updateAutoHMESettings: (settings: { enabled?: boolean; intervalMinutes?: number; countPerAccount?: number }) =>
     request('PUT', '/admin/auto-hme/settings', settings),
   triggerAutoHME: () => request('POST', '/admin/auto-hme/trigger'),
+
+  // System settings
+  getSystemSettings: () => request<{ proxyUrl: string }>('GET', '/admin/settings'),
+  updateSystemSettings: (settings: { proxyUrl?: string }) =>
+    request('PUT', '/admin/settings', settings),
 }
 
 export function clearSession() {
