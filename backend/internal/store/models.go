@@ -73,7 +73,7 @@ type Account struct {
 	Birthday           string `gorm:"size:50" json:"birthday"`
 	Country            string `gorm:"size:10" json:"country"`          // CHN, USA, etc.
 	AlternateEmails    string `gorm:"type:text" json:"alternateEmails"` // JSON array
-	PhoneNumbers       string `gorm:"type:text" json:"phoneNumbers"`    // JSON array of phone numbers
+	PhoneNumbers       string `gorm:"type:text" json:"phoneNumbers"`    // JSON array [{id, number}]
 	TrustedDeviceCount int    `gorm:"default:0" json:"trustedDeviceCount"`
 	TwoFactorEnabled   bool   `gorm:"default:false" json:"twoFactorEnabled"`
 

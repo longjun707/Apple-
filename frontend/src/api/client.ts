@@ -39,6 +39,7 @@ export interface AppleAccount {
   birthday?: string
   country?: string
   alternateEmails?: string | string[] // JSON string or array of alternate emails
+  phoneNumbers?: string // JSON string of PhoneNumber[]
   trustedDeviceCount?: number
   twoFactorEnabled?: boolean
 }
@@ -204,8 +205,8 @@ export const api = {
   adminInfo: () => request<AdminInfo>('GET', '/admin/info'),
 
   // Apple Account Management
-  listAccounts: (page = 1, pageSize = 20) =>
-    request<AccountListResult>('GET', `/accounts?page=${page}&pageSize=${pageSize}`),
+  listAccounts: (page = 1, pageSize = 20, search = '') =>
+    request<AccountListResult>('GET', `/accounts?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`),
 
   createAccount: (appleId: string, password: string, remark?: string) =>
     request<AppleAccount>('POST', '/accounts', { appleId, password, remark }),

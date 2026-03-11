@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 )
 
@@ -30,46 +31,42 @@ func (c *HMEClient) MarkRestoredSession() {
 	c.restoredSession = true
 }
 
-// ExtendSession calls Apple's session extend endpoint to refresh the session
+// ExtendSession validates the session by making a lightweight API call
 // Returns true if session is still valid
 func (c *HMEClient) ExtendSession() (bool, error) {
 	// Ensure cookies are set
 	c.ensureMyacinfo()
 
-	// Call session extend endpoint (actual Apple endpoint: /session/extend)
-	extendURL := "https://appleid.apple.com/session/extend"
-	req, _ := http.NewRequest("GET", extendURL, nil)
+	// Set idclient cookie on appleid.apple.com (required by Apple)
+	appleidURL, _ := url.Parse("https://appleid.apple.com")
+	c.auth.session.Client.Jar.SetCookies(appleidURL, []*http.Cookie{{
+		Name:  "idclient",
+		Value: "web",
+		Path:  "/",
+	}})
 
-	// Use same headers as browser (observed from Chrome DevTools)
-	req.Header.Set("User-Agent", ChromeUA)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://account.apple.com")
-	req.Header.Set("Referer", "https://account.apple.com/")
-	req.Header.Set("X-Apple-Api-Key", HMEWidgetKey)
-	req.Header.Set("X-Apple-I-Request-Context", "ca")
-	req.Header.Set("X-Apple-I-Timezone", "Asia/Shanghai")
-	req.Header.Set("X-Apple-I-FD-Client-Info", `{"U":"`+ChromeUA+`","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":""}`)
-	// Security headers like browser
-	req.Header.Set("Sec-Ch-Ua", `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-site")
-
-	// Include scnt header if available
-	c.auth.session.mu.RLock()
-	if c.auth.session.SCNT != "" {
-		req.Header.Set("scnt", c.auth.session.SCNT)
+	// Log cookies before request for debugging
+	cookies := c.auth.session.Client.Jar.Cookies(appleidURL)
+	var cookieNames []string
+	for _, ck := range cookies {
+		cookieNames = append(cookieNames, ck.Name)
 	}
-	c.auth.session.mu.RUnlock()
+	log.Printf("[HME] ExtendSession: cookies on appleid.apple.com = %v", cookieNames)
+
+	// Try bootstrap portal first - it's a lightweight check
+	req, _ := http.NewRequest("GET", BootstrapURL, nil)
+	for k, v := range c.hmeHeaders() {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := c.auth.session.Client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("session extend request failed: %w", err)
+		return false, fmt.Errorf("session validation failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Read response body
+	body, _ := io.ReadAll(resp.Body)
 
 	// Update SCNT from response
 	if scnt := resp.Header.Get("scnt"); scnt != "" {
@@ -78,14 +75,36 @@ func (c *HMEClient) ExtendSession() (bool, error) {
 		c.auth.session.mu.Unlock()
 	}
 
-	log.Printf("[HME] Session extend: status=%d", resp.StatusCode)
+	log.Printf("[HME] Session validate (bootstrap): status=%d, body_len=%d", resp.StatusCode, len(body))
 
-	if resp.StatusCode == 200 || resp.StatusCode == 204 {
-		return true, nil
+	if resp.StatusCode == 200 {
+		// Bootstrap succeeded, now try HME list to fully validate
+		hmeReq, _ := http.NewRequest("GET", AccountBase+"/email/private", nil)
+		for k, v := range c.hmeHeaders() {
+			hmeReq.Header.Set(k, v)
+		}
+
+		hmeResp, err := c.auth.session.Client.Do(hmeReq)
+		if err != nil {
+			return false, fmt.Errorf("HME validation failed: %w", err)
+		}
+		defer hmeResp.Body.Close()
+		hmeBody, _ := io.ReadAll(hmeResp.Body)
+
+		log.Printf("[HME] Session validate (HME list): status=%d, body_len=%d", hmeResp.StatusCode, len(hmeBody))
+
+		if hmeResp.StatusCode == 200 {
+			return true, nil
+		} else if hmeResp.StatusCode == 401 || hmeResp.StatusCode == 403 {
+			return false, fmt.Errorf("session expired (HME status %d)", hmeResp.StatusCode)
+		}
+		return false, fmt.Errorf("unexpected HME status: %d", hmeResp.StatusCode)
 	} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		log.Printf("[HME] Session validate failed (status %d): %s", resp.StatusCode, string(body[:min(len(body), 500)]))
 		return false, fmt.Errorf("session expired (status %d)", resp.StatusCode)
 	}
 
+	log.Printf("[HME] Session validate unexpected status: %s", string(body[:min(len(body), 500)]))
 	return false, fmt.Errorf("unexpected status: %d", resp.StatusCode)
 }
 
@@ -199,11 +218,26 @@ func (c *HMEClient) Bootstrap() error {
 		return fmt.Errorf("bootstrap failed: HTTP %d - %s", resp.StatusCode, string(body[:min(len(body), 200)]))
 	}
 
-	// Capture aidsp cookie from bootstrap response
-	for _, cookie := range resp.Cookies() {
-		if cookie.Name == "aidsp" {
-			c.auth.session.Client.Jar.SetCookies(appleidURL, []*http.Cookie{{
-				Name:  "aidsp",
+	// Capture ALL cookies from bootstrap response and set on all Apple domains
+	respCookies := resp.Cookies()
+	var cookieNames []string
+	for _, cookie := range respCookies {
+		cookieNames = append(cookieNames, cookie.Name)
+	}
+	log.Printf("[HME] Bootstrap portal returned cookies: %v", cookieNames)
+
+	// Set important cookies on all Apple domains
+	allDomains := []string{
+		"https://apple.com",
+		"https://idmsa.apple.com",
+		"https://appleid.apple.com",
+		"https://account.apple.com",
+	}
+	for _, cookie := range respCookies {
+		for _, d := range allDomains {
+			u, _ := url.Parse(d)
+			c.auth.session.Client.Jar.SetCookies(u, []*http.Cookie{{
+				Name:  cookie.Name,
 				Value: cookie.Value,
 				Path:  "/",
 			}})
@@ -561,13 +595,20 @@ func (c *HMEClient) GetAccountProfile() (*AccountProfileInfo, error) {
 
 	profile := &AccountProfileInfo{}
 
-	// 1. Get /account/manage for basic info
-	manageResp, err := c.doRequest("GET", AccountBase, nil)
+	// First, try to exchange session by visiting account.apple.com (like browser does after 2FA)
+	c.exchangeAccountSession()
+
+	// 1. Get /account/manage for basic info - use account-specific headers
+	manageResp, err := c.doAccountRequest("GET", AccountBase, nil)
 	if err == nil {
 		if manageResp.StatusCode == 200 {
-			// Read body for debugging
+			// Read body and save to file for debugging
 			body, _ := io.ReadAll(manageResp.Body)
-			log.Printf("[Profile] /account/manage response (first 1000 chars): %s", string(body[:min(len(body), 1000)]))
+			log.Printf("[Profile] /account/manage response length: %d", len(body))
+			
+			// Save response to file for analysis
+			os.WriteFile("account_manage_response.json", body, 0644)
+			log.Printf("[Profile] Response saved to account_manage_response.json")
 
 			var manageData AccountManageResponse
 			if json.Unmarshal(body, &manageData) == nil {
@@ -580,6 +621,16 @@ func (c *HMEClient) GetAccountProfile() (*AccountProfileInfo, error) {
 						profile.AlternateEmails = append(profile.AlternateEmails, email.Address)
 					}
 				}
+				// Parse phone numbers from account.security section
+				if len(manageData.Account.Security.PhoneNumbers) > 0 {
+					profile.PhoneNumbers = manageData.Account.Security.PhoneNumbers
+					log.Printf("[Profile] Found %d phone numbers", len(profile.PhoneNumbers))
+					for _, phone := range profile.PhoneNumbers {
+						log.Printf("[Profile] Phone: id=%d, number=%s", phone.ID, phone.FullNumberWithCountryPrefix)
+					}
+				} else {
+					log.Printf("[Profile] No phone numbers found in account.security")
+				}
 			}
 		} else {
 			body, _ := io.ReadAll(manageResp.Body)
@@ -589,7 +640,7 @@ func (c *HMEClient) GetAccountProfile() (*AccountProfileInfo, error) {
 	}
 
 	// 2. Get devices count
-	devResp, err := c.doRequest("GET", AccountBase+"/security/devices", nil)
+	devResp, err := c.doAccountRequest("GET", AccountBase+"/security/devices", nil)
 	if err == nil {
 		if devResp.StatusCode == 200 {
 			var devicesData DevicesResponse
@@ -601,6 +652,52 @@ func (c *HMEClient) GetAccountProfile() (*AccountProfileInfo, error) {
 	}
 
 	return profile, nil
+}
+
+// doAccountRequest performs a request to account.apple.com with appropriate headers
+func (c *HMEClient) doAccountRequest(method, urlPath string, body interface{}) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		jsonData, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		bodyReader = bytes.NewReader(jsonData)
+	}
+
+	req, err := http.NewRequest(method, urlPath, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use headers appropriate for account.apple.com (different from HME API)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", ChromeUA)
+	req.Header.Set("Origin", "https://account.apple.com")
+	req.Header.Set("Referer", "https://account.apple.com/")
+	req.Header.Set("X-Apple-I-Request-Context", "ca")
+	req.Header.Set("X-Apple-I-Timezone", "Asia/Shanghai")
+	// Use AuthWidgetKey for account.apple.com APIs
+	req.Header.Set("X-Apple-Api-Key", AuthWidgetKey)
+	// Security headers
+	req.Header.Set("Sec-Ch-Ua", `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+
+	c.auth.session.mu.RLock()
+	if c.auth.session.SCNT != "" {
+		req.Header.Set("scnt", c.auth.session.SCNT)
+	}
+	if c.auth.session.SessionID != "" {
+		req.Header.Set("X-Apple-ID-Session-Id", c.auth.session.SessionID)
+	}
+	c.auth.session.mu.RUnlock()
+
+	return c.auth.session.Client.Do(req)
 }
 
 // GetFamilyMembers returns family sharing info

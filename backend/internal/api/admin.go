@@ -77,7 +77,7 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 
 	updates := map[string]interface{}{}
 
-	// 1. Get profile info (birthday, country, devices)
+	// 1. Get profile info (birthday, country, devices, phone numbers)
 	profileResp, err := hme.GetAccountProfile()
 	if err != nil {
 		log.Printf("[Profile] Failed to get profile for account %d: %v", accountID, err)
@@ -91,6 +91,12 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 		if len(profileResp.AlternateEmails) > 0 {
 			emailsJSON, _ := json.Marshal(profileResp.AlternateEmails)
 			updates["alternate_emails"] = string(emailsJSON)
+		}
+		// Save phone numbers from security section
+		if len(profileResp.PhoneNumbers) > 0 {
+			phonesJSON, _ := json.Marshal(profileResp.PhoneNumbers)
+			updates["phone_numbers"] = string(phonesJSON)
+			log.Printf("[Profile] Saving %d phone numbers for account %d", len(profileResp.PhoneNumbers), accountID)
 		}
 		updates["trusted_device_count"] = profileResp.TrustedDeviceCount
 	}
@@ -130,8 +136,14 @@ func fetchAndSaveAccountInfo(accountID uint, hme *apple.HMEClient) {
 	}
 
 	if len(updates) > 0 {
-		store.DB.Model(&store.Account{}).Where("id = ?", accountID).Updates(updates)
-		log.Printf("[Account] Saved account info for %d: %+v", accountID, updates)
+		result := store.DB.Model(&store.Account{}).Where("id = ?", accountID).Updates(updates)
+		if result.Error != nil {
+			log.Printf("[Account] ERROR saving account info for %d: %v", accountID, result.Error)
+		} else {
+			log.Printf("[Account] Saved account info for %d (rows=%d): %+v", accountID, result.RowsAffected, updates)
+		}
+	} else {
+		log.Printf("[Account] No updates to save for account %d", accountID)
 	}
 }
 
@@ -254,10 +266,14 @@ func (s *Server) ListAccounts(c *gin.Context) {
 	}
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 	pageSize = clampPageSize(pageSize)
+	search := escapeLike(c.Query("search"))
 
-	accounts, total, err := store.NewAccountRepo().List(page, pageSize)
+	accounts, total, err := store.NewAccountRepo().List(page, pageSize, search)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
 		return
@@ -320,6 +336,13 @@ func (s *Server) UpdateAccount(c *gin.Context) {
 	var req UpdateAccountRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	// Check for duplicate Apple ID (exclude current account)
+	var existing store.Account
+	if err := store.DB.Where("apple_id = ? AND id != ?", req.AppleID, id).First(&existing).Error; err == nil {
+		c.JSON(http.StatusOK, APIResponse{Success: false, Error: "该 Apple ID 已被其他账户使用"})
 		return
 	}
 
@@ -403,6 +426,16 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 
 	if result.Requires2FA {
 		updates["last_error"] = "需要2FA验证"
+		
+		// Save phone numbers to database (from 2FA trusted phones)
+		if len(result.PhoneNumbers) > 0 {
+			phonesJSON, _ := json.Marshal(result.PhoneNumbers)
+			updates["phone_numbers"] = string(phonesJSON)
+			log.Printf("[Login] Saving %d trusted phone numbers for account %d: %s", len(result.PhoneNumbers), id, string(phonesJSON))
+		} else {
+			log.Printf("[Login] No trusted phone numbers returned for account %d", id)
+		}
+		
 		store.DB.Model(&account).Updates(updates)
 
 		// Store auth client for 2FA
@@ -453,8 +486,15 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 // Verify2FAForAccount verifies 2FA for an Apple account
 func (s *Server) Verify2FAForAccount(c *gin.Context) {
 	session := c.MustGet("session").(*SessionState)
-	if session.Auth == nil {
-		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "请先登录Apple账户"})
+
+	// Validate URL :id matches session's current account
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	if id == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "无效的ID"})
+		return
+	}
+	if session.Auth == nil || session.AccountID != uint(id) {
+		c.JSON(http.StatusUnauthorized, APIResponse{Success: false, Error: "请先登录此Apple账户"})
 		return
 	}
 
@@ -493,11 +533,13 @@ func (s *Server) Verify2FAForAccount(c *gin.Context) {
 	session.Auth.LogAllCookies()
 
 	// Update account status
-	store.DB.Model(&store.Account{}).Where("id = ?", session.AccountID).Updates(map[string]interface{}{
-		"status":             1,
-		"last_error":         "",
-		"two_factor_enabled": true,
-	})
+	if store.DB != nil {
+		store.DB.Model(&store.Account{}).Where("id = ?", session.AccountID).Updates(map[string]interface{}{
+			"status":             1,
+			"last_error":         "",
+			"two_factor_enabled": true,
+		})
+	}
 
 	// Persist full Apple session (tokens + cookies) to database AFTER Bootstrap
 	saveAppleSession(session.AccountID, session.Auth)
@@ -672,28 +714,42 @@ func addAutoHMELog(level, message string) {
 	log.Printf("[AutoHME] %s", message)
 }
 
-// StartPeriodicHMECreation starts a goroutine that creates HME for all accounts every 30 minutes
+// StartPeriodicHMECreation starts a goroutine that creates HME for all accounts periodically
 func StartPeriodicHMECreation() {
 	go func() {
 		for {
-			// Calculate next run time
-			nextRun := time.Now().Add(time.Duration(autoHMEStatus.IntervalMinutes) * time.Minute)
+			// Read settings under lock
+			autoHMEStatus.mu.RLock()
+			intervalMin := autoHMEStatus.IntervalMinutes
+			autoHMEStatus.mu.RUnlock()
+
+			nextRun := time.Now().Add(time.Duration(intervalMin) * time.Minute)
 			autoHMEStatus.mu.Lock()
 			autoHMEStatus.NextRunTime = &nextRun
 			autoHMEStatus.mu.Unlock()
-			
-			addAutoHMELog("info", fmt.Sprintf("下次自动创建将在 %d 分钟后执行", autoHMEStatus.IntervalMinutes))
-			time.Sleep(time.Duration(autoHMEStatus.IntervalMinutes) * time.Minute)
 
-			if autoHMEStatus.Enabled {
+			addAutoHMELog("info", fmt.Sprintf("下次自动创建将在 %d 分钟后执行", intervalMin))
+			time.Sleep(time.Duration(intervalMin) * time.Minute)
+
+			// Read enabled and countPerAccount under lock
+			autoHMEStatus.mu.RLock()
+			enabled := autoHMEStatus.Enabled
+			countPerAcc := autoHMEStatus.CountPerAccount
+			autoHMEStatus.mu.RUnlock()
+
+			if enabled {
 				addAutoHMELog("info", "开始执行定时自动创建 HME 任务...")
-				AutoCreateHMEForAllAccounts(autoHMEStatus.CountPerAccount)
+				AutoCreateHMEForAllAccounts(countPerAcc)
 			} else {
 				addAutoHMELog("warning", "自动创建任务已禁用，跳过本次执行")
 			}
 		}
 	}()
-	addAutoHMELog("info", fmt.Sprintf("定时自动创建 HME 任务已启动 (每 %d 分钟执行一次，每账户创建 %d 个)", autoHMEStatus.IntervalMinutes, autoHMEStatus.CountPerAccount))
+	autoHMEStatus.mu.RLock()
+	initInterval := autoHMEStatus.IntervalMinutes
+	initCount := autoHMEStatus.CountPerAccount
+	autoHMEStatus.mu.RUnlock()
+	addAutoHMELog("info", fmt.Sprintf("定时自动创建 HME 任务已启动 (每 %d 分钟执行一次，每账户创建 %d 个)", initInterval, initCount))
 }
 
 // AutoCreateHMEForAllAccounts creates HME for all accounts with valid sessions
@@ -704,9 +760,14 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		return
 	}
 
-	// Mark task as running
+	// Check and mark task as running (prevent overlapping runs)
 	now := time.Now()
 	autoHMEStatus.mu.Lock()
+	if autoHMEStatus.Running {
+		autoHMEStatus.mu.Unlock()
+		addAutoHMELog("warning", "任务已在执行中，跳过本次运行")
+		return
+	}
 	autoHMEStatus.Running = true
 	autoHMEStatus.LastRunTime = &now
 	autoHMEStatus.TotalCreated = 0
@@ -768,25 +829,31 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 
 		// Create HME one by one (synchronously, no concurrency)
 		created := 0
+		consecutiveFailed := 0
 		failed := 0
+		batchTS := time.Now().Format("0102-1504")
 		for i := 0; i < countPerAccount; i++ {
 			autoHMEStatus.mu.Lock()
 			autoHMEStatus.CurrentProgress = i + 1
 			autoHMEStatus.mu.Unlock()
 
-			label := fmt.Sprintf("Auto-%s-%d", time.Now().Format("0102"), i+1)
+			label := fmt.Sprintf("Auto-%s-%d", batchTS, i+1)
 			email, err := hme.CreateEmail(label, "", "")
 			if err != nil {
 				addAutoHMELog("error", fmt.Sprintf("账户 %s: 创建第 %d 个 HME 失败: %v", account.AppleID, i+1, err))
+				consecutiveFailed++
 				failed++
 				// If we get too many consecutive failures, stop for this account
-				if failed >= 3 {
-					addAutoHMELog("warning", fmt.Sprintf("账户 %s: 连续失败过多，跳过剩余创建", account.AppleID))
+				if consecutiveFailed >= 3 {
+					addAutoHMELog("warning", fmt.Sprintf("账户 %s: 连续失败 %d 次，跳过剩余创建", account.AppleID, consecutiveFailed))
 					break
 				}
 				time.Sleep(2 * time.Second) // Wait longer on failure
 				continue
 			}
+
+			// Reset consecutive failure counter on success
+			consecutiveFailed = 0
 
 			// Save to database
 			hmeRepo := store.NewHMERepo()
@@ -839,40 +906,43 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 
 // GetAutoHMEStatus returns the current auto HME task status
 func (s *Server) GetAutoHMEStatus(c *gin.Context) {
-	autoHMEStatus.mu.RLock()
-	defer autoHMEStatus.mu.RUnlock()
-	
-	// Get eligible accounts (with valid non-expired sessions)
+	// Get eligible accounts OUTSIDE the lock (DB query can be slow)
 	var eligibleAccounts []struct {
-		AppleID string `json:"appleId"`
-		HMECount int    `json:"hmeCount"`
+		AppleID      string `json:"appleId"`
+		HMECount     int    `json:"hmeCount"`
+		PhoneNumbers string `json:"phoneNumbers"`
 	}
 	if store.DB != nil {
 		// Session must exist, status=1, and session_saved_at within maxSessionAge (7 days)
 		minSessionTime := time.Now().Add(-maxSessionAge)
 		store.DB.Model(&store.Account{}).
-			Select("apple_id, hme_count").
+			Select("apple_id, hme_count, phone_numbers").
 			Where("session_token != '' AND session_token IS NOT NULL AND status = 1 AND session_saved_at IS NOT NULL AND session_saved_at > ?", minSessionTime).
 			Find(&eligibleAccounts)
 	}
-	
+
+	// Read status fields under lock
+	autoHMEStatus.mu.RLock()
+	statusData := map[string]interface{}{
+		"enabled":           autoHMEStatus.Enabled,
+		"running":           autoHMEStatus.Running,
+		"intervalMinutes":   autoHMEStatus.IntervalMinutes,
+		"countPerAccount":   autoHMEStatus.CountPerAccount,
+		"lastRunTime":       autoHMEStatus.LastRunTime,
+		"nextRunTime":       autoHMEStatus.NextRunTime,
+		"currentAccount":    autoHMEStatus.CurrentAccount,
+		"currentProgress":   autoHMEStatus.CurrentProgress,
+		"totalAccounts":     autoHMEStatus.TotalAccounts,
+		"processedAccounts": autoHMEStatus.ProcessedAccounts,
+		"totalCreated":      autoHMEStatus.TotalCreated,
+		"totalFailed":       autoHMEStatus.TotalFailed,
+		"eligibleAccounts":  eligibleAccounts,
+	}
+	autoHMEStatus.mu.RUnlock()
+
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
-		Data: map[string]interface{}{
-			"enabled":           autoHMEStatus.Enabled,
-			"running":           autoHMEStatus.Running,
-			"intervalMinutes":   autoHMEStatus.IntervalMinutes,
-			"countPerAccount":   autoHMEStatus.CountPerAccount,
-			"lastRunTime":       autoHMEStatus.LastRunTime,
-			"nextRunTime":       autoHMEStatus.NextRunTime,
-			"currentAccount":    autoHMEStatus.CurrentAccount,
-			"currentProgress":   autoHMEStatus.CurrentProgress,
-			"totalAccounts":     autoHMEStatus.TotalAccounts,
-			"processedAccounts": autoHMEStatus.ProcessedAccounts,
-			"totalCreated":      autoHMEStatus.TotalCreated,
-			"totalFailed":       autoHMEStatus.TotalFailed,
-			"eligibleAccounts":  eligibleAccounts,
-		},
+		Data:    statusData,
 	})
 }
 
@@ -915,28 +985,34 @@ func (s *Server) UpdateAutoHMESettings(c *gin.Context) {
 	if req.CountPerAccount != nil && *req.CountPerAccount >= 1 && *req.CountPerAccount <= 100 {
 		autoHMEStatus.CountPerAccount = *req.CountPerAccount
 	}
+	// Capture values before unlock for logging
+	enabled := autoHMEStatus.Enabled
+	intervalMin := autoHMEStatus.IntervalMinutes
+	countPerAcc := autoHMEStatus.CountPerAccount
 	autoHMEStatus.mu.Unlock()
 
-	addAutoHMELog("info", fmt.Sprintf("设置已更新: 启用=%v, 间隔=%d分钟, 每账户创建=%d个", 
-		autoHMEStatus.Enabled, autoHMEStatus.IntervalMinutes, autoHMEStatus.CountPerAccount))
+	addAutoHMELog("info", fmt.Sprintf("设置已更新: 启用=%v, 间隔=%d分钟, 每账户创建=%d个",
+		enabled, intervalMin, countPerAcc))
 
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }
 
 // TriggerAutoHME manually triggers the auto HME creation
 func (s *Server) TriggerAutoHME(c *gin.Context) {
-	autoHMEStatus.mu.RLock()
-	isRunning := autoHMEStatus.Running
-	autoHMEStatus.mu.RUnlock()
-
-	if isRunning {
+	autoHMEStatus.mu.Lock()
+	if autoHMEStatus.Running {
+		autoHMEStatus.mu.Unlock()
 		c.JSON(http.StatusOK, APIResponse{Success: false, Error: "任务正在执行中"})
 		return
 	}
+	// Mark as running under the same lock to prevent TOCTOU race
+	autoHMEStatus.Running = true
+	countPerAcc := autoHMEStatus.CountPerAccount
+	autoHMEStatus.mu.Unlock()
 
 	go func() {
 		addAutoHMELog("info", "手动触发自动创建 HME 任务...")
-		AutoCreateHMEForAllAccounts(autoHMEStatus.CountPerAccount)
+		AutoCreateHMEForAllAccounts(countPerAcc)
 	}()
 
 	c.JSON(http.StatusOK, APIResponse{Success: true, Data: map[string]string{"message": "任务已触发"}})
@@ -988,6 +1064,10 @@ func (s *Server) GetAccountHME(c *gin.Context) {
 	}
 
 	// Fallback: fetch from database — convert to HMEEmail format for frontend consistency
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
 	records, err := store.NewHMERepo().FindByAccountID(uint(id))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: err.Error()})
@@ -1151,6 +1231,9 @@ func (s *Server) AdminListAllHME(c *gin.Context) {
 	}
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 	pageSize = clampPageSize(pageSize)
 	search := c.Query("search")

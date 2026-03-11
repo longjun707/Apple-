@@ -615,6 +615,7 @@ func (a *AppleAuth) ExportSessionData() (token, scnt, sessionID, cookiesJSON str
 
 	var allCookies []SerializableCookie
 	var cookieNames []string
+	keyCookieFound := make(map[string]bool) // track key cookies
 	for _, d := range cookieDomains {
 		u, _ := url.Parse(d)
 		for _, c := range a.session.Client.Jar.Cookies(u) {
@@ -625,19 +626,26 @@ func (a *AppleAuth) ExportSessionData() (token, scnt, sessionID, cookiesJSON str
 				Path:   "/",
 			})
 			cookieNames = append(cookieNames, u.Host+":"+c.Name)
+			// Track key cookies
+			if c.Name == "myacinfo" || c.Name == "aidsp" || c.Name == "acn01" {
+				keyCookieFound[c.Name] = true
+			}
 		}
 	}
 	data, _ := json.Marshal(allCookies)
 	cookiesJSON = string(data)
 
-	srpLog.Printf("[Export] token_len=%d, scnt_len=%d, sessionID_len=%d, cookies=%d: %v",
-		len(token), len(scnt), len(sessionID), len(allCookies), cookieNames)
+	// Log key cookie status
+	log.Printf("[Export] Key cookies: myacinfo=%v, aidsp=%v, acn01=%v",
+		keyCookieFound["myacinfo"], keyCookieFound["aidsp"], keyCookieFound["acn01"])
+	log.Printf("[Export] token_len=%d, scnt_len=%d, sessionID_len=%d, cookies=%d",
+		len(token), len(scnt), len(sessionID), len(allCookies))
 	return
 }
 
 // RestoreAppleAuth restores a full AppleAuth from persisted session data
 func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
-	srpLog.Printf("[Restore] Input: token_len=%d, scnt_len=%d, sessionID_len=%d, cookiesJSON_len=%d",
+	log.Printf("[Restore] Input: token_len=%d, scnt_len=%d, sessionID_len=%d, cookiesJSON_len=%d",
 		len(token), len(scnt), len(sessionID), len(cookiesJSON))
 
 	auth := NewAppleAuth()
@@ -665,7 +673,48 @@ func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
 				}
 			}
 
-			// Group cookies by domain and set them
+			// CRITICAL: Set cookies on ALL relevant Apple domains to ensure subdomain coverage
+			// Apple's cookies need to be available across all subdomains
+			allDomains := []string{
+				"https://apple.com",
+				"https://idmsa.apple.com",
+				"https://appleid.apple.com",
+				"https://account.apple.com",
+				"https://www.icloud.com",
+				"https://setup.icloud.com",
+			}
+
+			// Build a map of cookie name -> value from uniqueCookies
+			cookieMap := make(map[string]string)
+			for _, c := range uniqueCookies {
+				cookieMap[c.Name] = c.Value
+				restoredNames = append(restoredNames, c.Domain+":"+c.Name)
+			}
+
+			// Log key cookie status
+			log.Printf("[Restore] Key cookies found: myacinfo=%v (len=%d), aidsp=%v (len=%d), acn01=%v (len=%d)",
+				cookieMap["myacinfo"] != "", len(cookieMap["myacinfo"]),
+				cookieMap["aidsp"] != "", len(cookieMap["aidsp"]),
+				cookieMap["acn01"] != "", len(cookieMap["acn01"]))
+
+			// Key cookies that must be set on all Apple domains
+			keyCookies := []string{"myacinfo", "aidsp", "dslang", "site", "acn01"}
+
+			// Set key cookies on all domains
+			for _, cookieName := range keyCookies {
+				if val, ok := cookieMap[cookieName]; ok && val != "" {
+					for _, d := range allDomains {
+						u, _ := url.Parse(d)
+						auth.session.Client.Jar.SetCookies(u, []*http.Cookie{{
+							Name:  cookieName,
+							Value: val,
+							Path:  "/",
+						}})
+					}
+				}
+			}
+
+			// Also restore other cookies to their original domain
 			for _, c := range uniqueCookies {
 				u, _ := url.Parse("https://" + c.Domain)
 				auth.session.Client.Jar.SetCookies(u, []*http.Cookie{{
@@ -673,13 +722,12 @@ func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
 					Value: c.Value,
 					Path:  c.Path,
 				}})
-				restoredNames = append(restoredNames, c.Domain+":"+c.Name)
 			}
-			srpLog.Printf("[Restore] Restored %d unique cookies: %v", len(uniqueCookies), restoredNames)
+			log.Printf("[Restore] Restored %d unique cookies", len(uniqueCookies))
 		}
 	}
 
-	// Also set myacinfo on key domains if we have a token
+	// Also ensure myacinfo is set on all key domains if we have a token
 	if token != "" {
 		for _, d := range []string{"https://apple.com", "https://appleid.apple.com", "https://idmsa.apple.com", "https://account.apple.com"} {
 			u, _ := url.Parse(d)
@@ -692,10 +740,6 @@ func RestoreAppleAuth(token, scnt, sessionID, cookiesJSON string) *AppleAuth {
 	}
 
 	auth.session.mu.Unlock()
-
-	// Log restored cookies for debugging
-	srpLog.Printf("[Restore] Final cookie state after restore:")
-	auth.LogAllCookies()
 
 	return auth
 }

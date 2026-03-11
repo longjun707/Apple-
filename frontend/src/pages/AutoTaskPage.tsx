@@ -15,12 +15,20 @@ import {
   Settings,
   Zap,
   Users,
+  Phone,
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
+
+interface PhoneNumber {
+  id: number
+  numberWithDialCode?: string
+  fullNumberWithCountryPrefix?: string
+}
 
 interface EligibleAccount {
   appleId: string
   hmeCount: number
+  phoneNumbers: string // JSON string of PhoneNumber[]
 }
 
 interface AutoHMEStatus {
@@ -370,17 +378,38 @@ export default function AutoTaskPage() {
           </div>
           <div className="max-h-[200px] overflow-y-auto">
             <div className="divide-y divide-gray-50">
-              {statusData.eligibleAccounts.map((account, idx) => (
-                <div key={idx} className="px-5 py-3 flex items-center justify-between hover:bg-gray-50">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-green-100 flex items-center justify-center">
-                      <CheckCircle2 className="w-4 h-4 text-green-600" />
+              {statusData.eligibleAccounts.map((account, idx) => {
+                // Parse phone numbers from JSON string
+                let phones: PhoneNumber[] = []
+                if (account.phoneNumbers) {
+                  try {
+                    phones = JSON.parse(account.phoneNumbers)
+                  } catch {
+                    // ignore parse errors
+                  }
+                }
+                return (
+                  <div key={idx} className="px-5 py-3 flex items-center justify-between hover:bg-gray-50">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-green-100 flex items-center justify-center">
+                        <CheckCircle2 className="w-4 h-4 text-green-600" />
+                      </div>
+                      <div>
+                        <span className="text-sm text-gray-800">{account.appleId}</span>
+                        {phones.length > 0 && (
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <Phone className="w-3 h-3 text-gray-400" />
+                            <span className="text-xs text-gray-400">
+                              {phones.map(p => p.fullNumberWithCountryPrefix || p.numberWithDialCode || '').join(', ')}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <span className="text-sm text-gray-800">{account.appleId}</span>
+                    <span className="text-xs text-gray-400">{account.hmeCount} 个 HME</span>
                   </div>
-                  <span className="text-xs text-gray-400">{account.hmeCount} 个 HME</span>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         </div>

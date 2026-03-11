@@ -82,15 +82,21 @@ func (r *AccountRepo) UpdateHMECount(accountID uint, count int) error {
 	return DB.Model(&Account{}).Where("id = ?", accountID).Update("hme_count", count).Error
 }
 
-// List returns all accounts
-func (r *AccountRepo) List(page, pageSize int) ([]Account, int64, error) {
+// List returns accounts with optional search filter
+func (r *AccountRepo) List(page, pageSize int, search string) ([]Account, int64, error) {
 	var accounts []Account
 	var total int64
 
-	DB.Model(&Account{}).Count(&total)
+	query := DB.Model(&Account{})
+	if search != "" {
+		like := "%" + search + "%"
+		query = query.Where("apple_id LIKE ? OR full_name LIKE ? OR remark LIKE ?", like, like, like)
+	}
+
+	query.Count(&total)
 
 	offset := (page - 1) * pageSize
-	err := DB.Offset(offset).Limit(pageSize).Order("created_at DESC").Find(&accounts).Error
+	err := query.Offset(offset).Limit(pageSize).Order("created_at DESC").Find(&accounts).Error
 	return accounts, total, err
 }
 

@@ -137,6 +137,15 @@ func AutoMigrate() error {
 		return err
 	}
 
+	// Ensure phone_numbers column exists (GORM sometimes doesn't add new columns)
+	// MySQL will error if column exists, but that's OK
+	result := DB.Exec("ALTER TABLE accounts ADD COLUMN phone_numbers TEXT")
+	if result.Error != nil {
+		log.Printf("[Migration] phone_numbers column: %v (may already exist)", result.Error)
+	} else {
+		log.Printf("[Migration] Added phone_numbers column to accounts table")
+	}
+
 	// Create default admin if not exists
 	var count int64
 	DB.Model(&Admin{}).Count(&count)

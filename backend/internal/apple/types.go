@@ -190,11 +190,24 @@ type AccountManageResponse struct {
 		Type    string `json:"type"` // profile, rescue, etc.
 		Vetted  bool   `json:"vetted"`
 	} `json:"alternateEmailAddresses"`
+	// Account contains nested security info including phone numbers
 	Account struct {
 		Name      string `json:"name"`
 		FirstName string `json:"firstName"`
 		LastName  string `json:"lastName"`
+		Security  struct {
+			PhoneNumbers []SecurityPhoneNumber `json:"phoneNumbers"`
+		} `json:"security,omitempty"`
 	} `json:"account,omitempty"`
+}
+
+// SecurityPhoneNumber represents a phone number from /account/manage security section
+type SecurityPhoneNumber struct {
+	ID                        int    `json:"id"`
+	FullNumberWithCountryPrefix string `json:"fullNumberWithCountryPrefix"`
+	Number                    string `json:"number,omitempty"`
+	CountryCode               string `json:"countryCode,omitempty"`
+	Type                      string `json:"type,omitempty"`
 }
 
 // DevicesResponse represents /account/manage/security/devices API response
@@ -208,13 +221,14 @@ type DevicesResponse struct {
 
 // AccountProfileInfo aggregates all profile information
 type AccountProfileInfo struct {
-	FullName             string   `json:"fullName"`
-	Birthday             string   `json:"birthday"`
-	Country              string   `json:"country"`
-	AlternateEmails      []string `json:"alternateEmails"`
-	TrustedDeviceCount   int      `json:"trustedDeviceCount"`
-	TrustedPhoneCount    int      `json:"trustedPhoneCount"`
-	TwoFactorEnabled     bool     `json:"twoFactorEnabled"`
+	FullName           string                 `json:"fullName"`
+	Birthday           string                 `json:"birthday"`
+	Country            string                 `json:"country"`
+	AlternateEmails    []string               `json:"alternateEmails"`
+	PhoneNumbers       []SecurityPhoneNumber  `json:"phoneNumbers"`
+	TrustedDeviceCount int                    `json:"trustedDeviceCount"`
+	TrustedPhoneCount  int                    `json:"trustedPhoneCount"`
+	TwoFactorEnabled   bool                   `json:"twoFactorEnabled"`
 }
 
 // AuthState represents the current auth state

@@ -20,6 +20,7 @@ export default function TwoFAModal({ open, accountId, phoneNumbers, onClose, onS
   const [error, setError] = useState('')
   const [method, setMethod] = useState<'device' | 'sms'>('device')
   const [smsSent, setSmsSent] = useState(false)
+  const [selectedPhoneId, setSelectedPhoneId] = useState(1)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -28,12 +29,13 @@ export default function TwoFAModal({ open, accountId, phoneNumbers, onClose, onS
       setError('')
       setMethod('device')
       setSmsSent(false)
+      setSelectedPhoneId(phoneNumbers?.[0]?.id ?? 1)
       setTimeout(() => inputRef.current?.focus(), 100)
     }
-  }, [open])
+  }, [open, phoneNumbers])
 
   const verifyMutation = useMutation({
-    mutationFn: () => api.verify2FAForAccount(accountId!, code, method, 1),
+    mutationFn: () => api.verify2FAForAccount(accountId!, code, method, selectedPhoneId),
     onSuccess: (res) => {
       if (res.success) {
         toast.success('2FA 验证成功')
@@ -46,7 +48,7 @@ export default function TwoFAModal({ open, accountId, phoneNumbers, onClose, onS
   })
 
   const smsMutation = useMutation({
-    mutationFn: () => api.requestSMSForAccount(accountId!, 1),
+    mutationFn: (phoneId: number) => api.requestSMSForAccount(accountId!, phoneId),
     onSuccess: (res) => {
       if (res.success) {
         setSmsSent(true)
@@ -124,19 +126,20 @@ export default function TwoFAModal({ open, accountId, phoneNumbers, onClose, onS
                   key={phone.id}
                   type="button"
                   onClick={() => {
-                    smsMutation.mutate()
+                    setSelectedPhoneId(phone.id)
+                    smsMutation.mutate(phone.id)
                   }}
                   disabled={smsMutation.isPending}
                   className="w-full flex items-center justify-center gap-2 py-2.5 text-sm text-apple-blue hover:text-blue-700 transition-colors disabled:opacity-50"
                 >
                   <MessageSquare className="w-4 h-4" />
-                  {smsMutation.isPending ? '发送中...' : smsSent ? `重新发送到 ${phone.numberWithDialCode}` : `发送短信到 ${phone.numberWithDialCode}`}
+                  {smsMutation.isPending ? '发送中...' : smsSent && selectedPhoneId === phone.id ? `重新发送到 ${phone.numberWithDialCode}` : `发送短信到 ${phone.numberWithDialCode}`}
                 </button>
               ))
             ) : (
               <button
                 type="button"
-                onClick={() => smsMutation.mutate()}
+                onClick={() => smsMutation.mutate(1)}
                 disabled={smsMutation.isPending}
                 className="w-full flex items-center justify-center gap-2 py-2.5 text-sm text-apple-blue hover:text-blue-700 transition-colors disabled:opacity-50"
               >

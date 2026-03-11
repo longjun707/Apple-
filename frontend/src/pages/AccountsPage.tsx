@@ -3,8 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, type AppleAccount, type PhoneNumber } from '@/api/client'
 import { toast } from '@/stores/toastStore'
 import {
-  Plus, Trash2, LogIn, Mail, RefreshCw,
-  Edit, Loader2, Users, Shield, Smartphone, Eye,
+  Plus, Trash2, LogIn, Mail, RefreshCw, Search,
+  Edit, Loader2, Users, Shield, Smartphone, Eye, Phone,
 } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog'
@@ -15,6 +15,8 @@ import AccountHMEPanel from '@/components/account/AccountHMEPanel'
 export default function AccountsPage() {
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
+  const [search, setSearch] = useState('')
+  const [searchInput, setSearchInput] = useState('')
   // undefined = closed, null = add mode, AppleAccount = edit mode
   const [formAccount, setFormAccount] = useState<AppleAccount | null | undefined>(undefined)
   const [deleteTarget, setDeleteTarget] = useState<AppleAccount | null>(null)
@@ -24,8 +26,8 @@ export default function AccountsPage() {
 
   // ---- Data ----
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['accounts', page],
-    queryFn: () => api.listAccounts(page),
+    queryKey: ['accounts', page, search],
+    queryFn: () => api.listAccounts(page, 20, search),
   })
 
   const accounts = data?.data?.list || []
@@ -95,6 +97,27 @@ export default function AccountsPage() {
         </div>
       </div>
 
+      {/* Search */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          setSearch(searchInput)
+          setPage(1)
+        }}
+        className="mb-5"
+      >
+        <div className="relative max-w-md">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="搜索 Apple ID、姓名或备注..."
+            className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-apple-blue/20 focus:border-apple-blue transition-all placeholder:text-gray-400"
+          />
+        </div>
+      </form>
+
       {/* Loading */}
       {isLoading && (
         <div className="flex items-center justify-center py-20">
@@ -142,6 +165,26 @@ export default function AccountsPage() {
                         <div className="min-w-0">
                           <div className="text-sm font-medium text-gray-900 truncate max-w-[180px]">{account.appleId}</div>
                           {account.fullName && <div className="text-[12px] text-gray-400 truncate">{account.fullName}</div>}
+                          {/* Phone Numbers */}
+                          {(() => {
+                            try {
+                              const phones = account.phoneNumbers ? JSON.parse(account.phoneNumbers) : [];
+                              if (phones.length === 0) return null;
+                              // Support both formats: fullNumberWithCountryPrefix (from /account/manage) and numberWithDialCode (from login 2FA)
+                              const getPhone = (p: { fullNumberWithCountryPrefix?: string; numberWithDialCode?: string }) => 
+                                p.fullNumberWithCountryPrefix || p.numberWithDialCode || '';
+                              return (
+                                <div className="flex items-center gap-1 mt-0.5" title={phones.map(getPhone).join('\n')}>
+                                  <Phone className="w-3 h-3 text-green-500" />
+                                  <span className="text-[11px] text-green-600">
+                                    {getPhone(phones[0])}
+                                  </span>
+                                </div>
+                              );
+                            } catch {
+                              return null;
+                            }
+                          })()}
                         </div>
                       </button>
                     </td>

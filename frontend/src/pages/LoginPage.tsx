@@ -5,27 +5,37 @@ import { useAuthStore } from '@/stores/authStore'
 import { Lock, Shield, User } from 'lucide-react'
 import Button from '@/components/ui/Button'
 
-const USERNAME_KEY = 'admin-username'
+const CREDENTIALS_KEY = 'admin-credentials-v2'
 
-function getSavedUsername(): string | null {
+interface SavedCredentials {
+  username: string
+  password: string
+}
+
+function getSavedCredentials(): SavedCredentials | null {
   try {
-    // Migrate: clear old plaintext credentials if present
-    const old = localStorage.getItem('admin-credentials')
-    if (old) {
-      localStorage.removeItem('admin-credentials')
-    }
-    return localStorage.getItem(USERNAME_KEY)
+    // Migrate: clear old keys if present
+    localStorage.removeItem('admin-credentials')
+    localStorage.removeItem('admin-username')
+    
+    const saved = localStorage.getItem(CREDENTIALS_KEY)
+    if (!saved) return null
+    
+    const decoded = atob(saved)
+    return JSON.parse(decoded) as SavedCredentials
   } catch {
     return null
   }
 }
 
-function saveUsername(username: string) {
-  localStorage.setItem(USERNAME_KEY, username)
+function saveCredentials(username: string, password: string) {
+  const data: SavedCredentials = { username, password }
+  const encoded = btoa(JSON.stringify(data))
+  localStorage.setItem(CREDENTIALS_KEY, encoded)
 }
 
-function clearUsername() {
-  localStorage.removeItem(USERNAME_KEY)
+function clearCredentials() {
+  localStorage.removeItem(CREDENTIALS_KEY)
 }
 
 export default function LoginPage() {
@@ -36,11 +46,12 @@ export default function LoginPage() {
 
   const { setState, setAdmin } = useAuthStore()
 
-  // Load saved username on mount
+  // Load saved credentials on mount
   useEffect(() => {
-    const saved = getSavedUsername()
+    const saved = getSavedCredentials()
     if (saved) {
-      setUsername(saved)
+      setUsername(saved.username)
+      setPassword(saved.password)
     }
   }, [])
 
@@ -52,11 +63,10 @@ export default function LoginPage() {
         return
       }
       if (res.data) {
-        // Only save username (never password)
         if (rememberMe) {
-          saveUsername(username)
+          saveCredentials(username, password)
         } else {
-          clearUsername()
+          clearCredentials()
         }
         setAdmin(res.data)
         setState('authenticated')
@@ -139,7 +149,7 @@ export default function LoginPage() {
                 onChange={(e) => setRememberMe(e.target.checked)}
                 className="w-4 h-4 rounded border-gray-300 text-apple-blue focus:ring-apple-blue/30"
               />
-              <span className="text-sm text-gray-600">记住用户名</span>
+              <span className="text-sm text-gray-600">记住密码</span>
             </label>
 
             <Button
