@@ -147,6 +147,10 @@ func AutoMigrate() error {
 		log.Printf("[Migration] Added phone_numbers column to accounts table")
 	}
 
+	// Migrate session_scnt and session_id from VARCHAR to TEXT (fix truncation issue)
+	DB.Exec("ALTER TABLE accounts MODIFY COLUMN session_scnt TEXT")
+	DB.Exec("ALTER TABLE accounts MODIFY COLUMN session_id TEXT")
+
 	// Create default admin if not exists
 	var count int64
 	DB.Model(&Admin{}).Count(&count)

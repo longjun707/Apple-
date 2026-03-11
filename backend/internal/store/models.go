@@ -58,8 +58,8 @@ type Account struct {
 
 	// Apple session persistence (survives server restart)
 	SessionToken   string     `gorm:"type:text" json:"-"`
-	SessionSCNT    string     `gorm:"size:500" json:"-"`
-	SessionID      string     `gorm:"size:500" json:"-"`
+	SessionSCNT    string     `gorm:"type:text" json:"-"`
+	SessionID      string     `gorm:"type:text" json:"-"`
 	SessionCookies string     `gorm:"type:text" json:"-"`
 	SessionSavedAt *time.Time `json:"sessionSavedAt"`
 

@@ -1075,8 +1075,24 @@ func AutoCreateHMEForAllAccounts(countPerAccount int) {
 		// First extend session to make sure it's valid
 		ok, err := hme.ExtendSession()
 		if !ok {
+			errMsg := ""
+			if err != nil {
+				errMsg = err.Error()
+			}
+			// Check if it's a network error (timeout, connection refused, etc.)
+			isNetworkError := strings.Contains(errMsg, "timeout") ||
+				strings.Contains(errMsg, "deadline exceeded") ||
+				strings.Contains(errMsg, "connection refused") ||
+				strings.Contains(errMsg, "no such host") ||
+				strings.Contains(errMsg, "network is unreachable")
+			
+			if isNetworkError {
+				// Network error - don't clear session, just skip this account
+				addAutoHMELog("warning", fmt.Sprintf("账户 %s 网络超时，跳过本次执行: %v", account.AppleID, err))
+				continue
+			}
+			// Auth error (401/403) - clear invalid session
 			addAutoHMELog("error", fmt.Sprintf("账户 %s 会话无效: %v，清理并跳过", account.AppleID, err))
-			// Clear invalid session so we don't retry next cycle
 			go clearInvalidSession(account.ID)
 			continue
 		}
