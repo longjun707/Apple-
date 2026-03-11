@@ -96,13 +96,17 @@ func main() {
 				admin.GET("/auto-hme/logs", server.GetAutoHMELogs)
 				admin.PUT("/auto-hme/settings", server.UpdateAutoHMESettings)
 				admin.POST("/auto-hme/trigger", server.TriggerAutoHME)
+				// System settings
+				admin.GET("/settings", server.GetSystemSettings)
+				admin.PUT("/settings", server.UpdateSystemSettings)
 			}
 
 			// Apple Account management routes
 			accounts := protected.Group("/accounts")
 			{
-				accounts.GET("", server.ListAccounts)
-				accounts.POST("", server.CreateAccount)
+			accounts.GET("", server.ListAccounts)
+			accounts.POST("", server.CreateAccount)
+			accounts.POST("/batch", server.BatchCreateAccounts)
 				accounts.PUT("/:id", server.UpdateAccount)
 				accounts.DELETE("/:id", server.DeleteAccount)
 				accounts.POST("/:id/login", loginLimiter.Middleware(), server.LoginAppleAccount)

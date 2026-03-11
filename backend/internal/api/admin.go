@@ -37,6 +37,18 @@ type UpdateAccountRequest struct {
 	Remark   string `json:"remark"`
 }
 
+// BatchImportRequest represents a batch account import request
+type BatchImportRequest struct {
+	Accounts []AccountRequest `json:"accounts" binding:"required,min=1,max=500"`
+}
+
+// BatchImportResult represents the result of a batch account import
+type BatchImportResult struct {
+	Created int      `json:"created"`
+	Skipped int      `json:"skipped"`
+	Errors  []string `json:"errors"`
+}
+
 // clampPageSize enforces pageSize bounds [1, 100], defaulting to 20.
 func clampPageSize(pageSize int) int {
 	if pageSize < 1 {
@@ -288,6 +300,54 @@ func (s *Server) ListAccounts(c *gin.Context) {
 			"pageSize": pageSize,
 		},
 	})
+}
+
+// BatchCreateAccounts imports multiple Apple accounts at once
+func (s *Server) BatchCreateAccounts(c *gin.Context) {
+	var req BatchImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: "参数无效: " + err.Error()})
+		return
+	}
+
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
+	result := BatchImportResult{
+		Errors: make([]string, 0),
+	}
+
+	for _, item := range req.Accounts {
+		if item.AppleID == "" || item.Password == "" {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: Apple ID 或密码为空", item.AppleID))
+			continue
+		}
+
+		// Check if account already exists
+		var existing store.Account
+		if err := store.DB.Where("apple_id = ?", item.AppleID).First(&existing).Error; err == nil {
+			result.Skipped++
+			continue
+		}
+
+		account := &store.Account{
+			AppleID:  item.AppleID,
+			Password: store.EncryptPassword(item.Password),
+			Remark:   item.Remark,
+			Status:   1,
+		}
+
+		if err := store.DB.Create(account).Error; err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", item.AppleID, err))
+			continue
+		}
+
+		result.Created++
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Success: true, Data: result})
 }
 
 // CreateAccount creates a new Apple account
@@ -1649,5 +1709,46 @@ func (s *Server) SetForwardEmail(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, APIResponse{Success: true})
+}
+
+// GetSystemSettings returns system settings
+func (s *Server) GetSystemSettings(c *gin.Context) {
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
+	proxyURL, _ := store.GetSetting("proxy_url")
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]string{
+			"proxyUrl": proxyURL,
+		},
+	})
+}
+
+// UpdateSystemSettings updates system settings
+func (s *Server) UpdateSystemSettings(c *gin.Context) {
+	if store.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{Success: false, Error: "数据库未连接"})
+		return
+	}
+
+	var req struct {
+		ProxyURL string `json:"proxyUrl"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	if err := store.SetSetting("proxy_url", req.ProxyURL); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Success: false, Error: "保存失败"})
+		return
+	}
+
+	log.Printf("[Settings] Proxy URL updated: %s", req.ProxyURL)
 	c.JSON(http.StatusOK, APIResponse{Success: true})
 }
