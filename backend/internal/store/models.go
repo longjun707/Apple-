@@ -140,7 +140,8 @@ func (SystemSetting) TableName() string {
 // GetSetting retrieves a setting value by key
 func GetSetting(key string) (string, error) {
 	var setting SystemSetting
-	if err := DB.Where("key = ?", key).First(&setting).Error; err != nil {
+	// Use backticks for 'key' as it's a MySQL reserved word
+	if err := DB.Where("`key` = ?", key).First(&setting).Error; err != nil {
 		return "", err
 	}
 	return setting.Value, nil
@@ -149,7 +150,8 @@ func GetSetting(key string) (string, error) {
 // SetSetting saves or updates a setting
 func SetSetting(key, value string) error {
 	var setting SystemSetting
-	result := DB.Where("key = ?", key).First(&setting)
+	// Use backticks for 'key' as it's a MySQL reserved word
+	result := DB.Where("`key` = ?", key).First(&setting)
 	if result.Error != nil {
 		// Create new
 		setting = SystemSetting{Key: key, Value: value}

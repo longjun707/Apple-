@@ -69,6 +69,15 @@ func escapeLike(s string) string {
 	return s
 }
 
+// truncateError truncates error message to fit database column (max 500 chars)
+func truncateError(s string) string {
+	const maxLen = 500
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 // saveAppleSession persists Apple auth session (tokens + cookies) to database
 func saveAppleSession(accountID uint, auth *apple.AppleAuth) {
 	if store.DB == nil || auth == nil {
@@ -528,7 +537,7 @@ func (s *Server) LoginAppleAccount(c *gin.Context) {
 	}
 
 	if err != nil {
-		updates["last_error"] = err.Error()
+		updates["last_error"] = truncateError(err.Error())
 		updates["status"] = 2 // locked/error
 		store.DB.Model(&account).Updates(updates)
 		c.JSON(http.StatusOK, APIResponse{
